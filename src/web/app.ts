@@ -59,6 +59,8 @@ import { NewsWireSnapshot } from "../news/types.js";
 import { AlertManager } from "../alerts/alert-manager.js";
 import { OrderbookService } from "../orderbook/orderbook-service.js";
 import { AlphaPerformanceTracker } from "../feeds/alpha-tracker.js";
+import { DerivativesIntelligenceService } from "../derivatives/derivatives-intelligence.js";
+import { QuantExecutionCalculator } from "../execution/quant-execution-calculator.js";
 
 class ApexWebTerminal {
   private binanceWs: BinanceWsFeedManager;
@@ -72,10 +74,17 @@ class ApexWebTerminal {
   private chartRenderer: CanvasChartRenderer | null = null;
   private orderbookService: OrderbookService;
   private alphaTracker: AlphaPerformanceTracker;
+  private derivService: DerivativesIntelligenceService;
   private newsService: NewsService;
   private newsSnapshot: NewsWireSnapshot | null = null;
   private newsFilter: string = "ALL";
   private alertManager: AlertManager;
+
+  // Quant Execution Calculator State
+  private execSymbol: string = "BTCUSDT";
+  private execDirection: "LONG" | "SHORT" = "LONG";
+  private execBalanceUsd: number = 10000;
+  private execRiskPercent: number = 1.0;
 
   private tickers: Map<string, MarketTicker> = new Map();
   private prevPrices: Map<string, number> = new Map();
@@ -90,6 +99,8 @@ class ApexWebTerminal {
     | "MARKET"
     | "CHART"
     | "BOOK"
+    | "EXEC"
+    | "DERIV"
     | "RISK"
     | "ARB"
     | "FUNDING"
@@ -120,6 +131,7 @@ class ApexWebTerminal {
       wsConstructor as any,
     );
     this.alphaTracker = new AlphaPerformanceTracker();
+    this.derivService = new DerivativesIntelligenceService();
     this.newsService = NewsService.getInstance();
     this.alertManager = AlertManager.getInstance();
 
@@ -208,6 +220,8 @@ class ApexWebTerminal {
             <button class="cmd-chip active" data-cmd="MARKET">MARKET &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="CHART">📈 CHART &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="BOOK">🧱 BOOK &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="EXEC">🧮 EXEC &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="DERIV">🦅 DERIV &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="WHALE">🐋 WHALE &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="LIQ">⚡ LIQ &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="RISK">RISK &lt;GO&gt;</button>
@@ -353,6 +367,22 @@ class ApexWebTerminal {
       cleaned === "WALLS"
     ) {
       this.activeScreen = "BOOK";
+    } else if (
+      cleaned === "EXEC" ||
+      cleaned === "CALC" ||
+      cleaned === "KELLY" ||
+      cleaned === "MAGNET" ||
+      cleaned === "SETUP"
+    ) {
+      this.activeScreen = "EXEC";
+    } else if (
+      cleaned === "DERIV" ||
+      cleaned === "OPT" ||
+      cleaned === "OPTIONS" ||
+      cleaned === "OI" ||
+      cleaned === "SCAN"
+    ) {
+      this.activeScreen = "DERIV";
     } else if (
       cleaned === "ARB" ||
       cleaned === "BASIS" ||
@@ -551,6 +581,11 @@ class ApexWebTerminal {
     });
     this.orderbookService.start();
 
+    // 10. Deribit Options & Smart Money Positioning
+    this.derivService.fetchLiveDeribitOptions().then(() => {
+      if (this.activeScreen === "DERIV") this.render();
+    });
+
     setInterval(() => {
       FundingRateCalculator.fetchLiveFundingRates().then((r) => {
         this.fundingRates = r;
@@ -559,6 +594,9 @@ class ApexWebTerminal {
       this.onChainService.fetchMempoolFees();
       this.onChainService.fetchOpenInterest(this.prevPrices);
       this.newsService.fetchLatestNews().then((s) => (this.newsSnapshot = s));
+      this.derivService.fetchLiveDeribitOptions().then(() => {
+        if (this.activeScreen === "DERIV") this.render();
+      });
     }, 45000);
   }
 
@@ -656,6 +694,10 @@ class ApexWebTerminal {
       this.renderChartScreen(body);
     } else if (this.activeScreen === "BOOK") {
       this.renderOrderbookScreen(body);
+    } else if (this.activeScreen === "EXEC") {
+      this.renderExecScreen(body);
+    } else if (this.activeScreen === "DERIV") {
+      this.renderDerivScreen(body);
     } else if (this.activeScreen === "WHALE") {
       this.renderWhaleScreen(body);
     } else if (this.activeScreen === "LIQ") {
@@ -2635,6 +2677,512 @@ class ApexWebTerminal {
   }
 
   // ==========================================
+  // SCREEN: QUANT TRADE EXECUTION & LIQUIDATION MAGNETS (EXEC <GO>)
+  // ==========================================
+  private renderExecScreen(container: HTMLElement): void {
+    const sym = this.execSymbol;
+    const asset = sym.replace("USDT", "");
+    const ticker = this.tickers.get(sym);
+    const livePrice =
+      ticker?.price ||
+      (sym === "BTCUSDT"
+        ? 85200
+        : sym === "ETHUSDT"
+          ? 2250
+          : sym === "SOLUSDT"
+            ? 142
+            : 100);
+
+    // Get real candles if chart matches symbol
+    const chartData = this.chartService.buildChartData();
+    const candles =
+      chartData.symbol === sym && chartData.candles.length >= 5
+        ? chartData.candles
+        : [];
+
+    // Get L2 Orderbook snapshot if symbol matches
+    const obSnap =
+      this.orderbookService.getSymbol() === sym
+        ? this.orderbookService.getSnapshot()
+        : null;
+
+    // Get Open Interest & Funding Rate
+    const oiSnap = this.onChainService.getSnapshot();
+    const oiUsd =
+      oiSnap.openInterest.get(sym)?.openInterestUsd ||
+      (sym === "BTCUSDT"
+        ? 6800000000
+        : sym === "ETHUSDT"
+          ? 2900000000
+          : 850000000);
+    const fundingItem = this.fundingRates.find((f) => f.symbol === sym);
+    const fundingRate = fundingItem?.fundingRate ?? 0.0001;
+
+    // Alpha tracker win rate & profit factor
+    const priceMap = new Map<string, number>();
+    this.tickers.forEach((v, k) => priceMap.set(k, v.price));
+    const alphaSummary = this.alphaTracker.syncSignalsAndPrices(
+      this.whaleStream.getAlphaSignals(),
+      priceMap,
+    );
+
+    const magnets = QuantExecutionCalculator.calculateLiquidationMagnets(
+      sym,
+      livePrice,
+      oiUsd,
+      fundingRate,
+    );
+
+    const setup = QuantExecutionCalculator.calculateTradeSetup({
+      symbol: sym,
+      direction: this.execDirection,
+      accountBalanceUsd: this.execBalanceUsd,
+      riskPercent: this.execRiskPercent,
+      currentPrice: livePrice,
+      candles,
+      orderbook: obSnap,
+      whaleCampaigns: this.whaleStream.getTrancheCampaigns(),
+      winRatePercent:
+        alphaSummary.totalSignalsTracked > 0 ? alphaSummary.winRatePercent : 64,
+      magnetMap: magnets,
+    });
+
+    const allMagnetZones = [
+      ...magnets.upperShortSqueezePools,
+      ...magnets.lowerLongFlushPools,
+    ];
+
+    const fmtPrice = (p: number) =>
+      `$${p.toLocaleString(undefined, { minimumFractionDigits: p < 10 ? 4 : 2, maximumFractionDigits: p < 10 ? 4 : 2 })}`;
+
+    const symbols = [
+      "BTCUSDT",
+      "ETHUSDT",
+      "SOLUSDT",
+      "BNBUSDT",
+      "SUIUSDT",
+      "XRPUSDT",
+      "DOGEUSDT",
+    ];
+
+    container.innerHTML = `
+      <div class="terminal-screen screen-exec">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">🧮 QUANT EXECUTION CALCULATOR, WALL-PROTECTED STOP &amp; LIQUIDATION MAGNETS</h2>
+            <span class="screen-subtitle">ATR VOLATILITY BUFFER · L2 LIQUIDITY WALL SHIELD · HALF-KELLY POSITION SIZING · 25X-100X LIQUIDATION POOLS</span>
+          </div>
+          <div class="header-stat-pills">
+            ${symbols
+              .map(
+                (s) => `
+              <button class="terminal-btn-sm btn-exec-sym ${s === sym ? "active" : ""}" data-sym="${s}">
+                ${s.replace("USDT", "")}
+              </button>
+            `,
+              )
+              .join("")}
+          </div>
+        </div>
+
+        <!-- Interactive Control Bar -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 14px;">
+          <div>
+            <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 6px; letter-spacing: 0.08em;">EXECUTION BIAS / DIRECTION</div>
+            <div style="display: flex; gap: 8px;">
+              <button id="btn-exec-long" class="terminal-btn-sm" style="flex: 1; padding: 8px; font-weight: 700; ${this.execDirection === "LONG" ? "background: var(--green-dim); color: var(--green-bright); border-color: var(--green-bright);" : ""}">
+                🟢 LONG SETUP
+              </button>
+              <button id="btn-exec-short" class="terminal-btn-sm" style="flex: 1; padding: 8px; font-weight: 700; ${this.execDirection === "SHORT" ? "background: var(--red-dim); color: var(--red-bright); border-color: var(--red-bright);" : ""}">
+                🔴 SHORT SETUP
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 6px; letter-spacing: 0.08em;">ACCOUNT EQUITY (USD)</div>
+            <div style="display: flex; gap: 6px;">
+              <input type="number" id="input-exec-balance" class="command-input" value="${this.execBalanceUsd}" min="100" step="500" style="background: var(--bg-void); border: 1px solid var(--border-subtle); padding: 6px 10px; border-radius: 4px; width: 100%; font-size: 13px;" />
+            </div>
+          </div>
+
+          <div>
+            <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 6px; letter-spacing: 0.08em;">MAX RISK PER TRADE (% OF EQUITY)</div>
+            <div style="display: flex; gap: 6px;">
+              ${[0.5, 1.0, 2.0, 3.0]
+                .map(
+                  (r) => `
+                <button class="terminal-btn-sm btn-exec-risk ${this.execRiskPercent === r ? "active" : ""}" data-risk="${r}" style="flex: 1; padding: 7px 4px;">
+                  ${r.toFixed(1)}%
+                </button>
+              `,
+                )
+                .join("")}
+            </div>
+          </div>
+
+          <div>
+            <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 6px; letter-spacing: 0.08em;">ATR (14) VOLATILITY &amp; RISK BUDGET</div>
+            <div style="font-size: 13px; font-weight: 700; color: var(--amber-bright); padding-top: 4px;">
+              1R Risk = $${setup.maxRiskDollarUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })} · ATR = ${fmtPrice(setup.atr14Usd)} (${setup.atr14Percent.toFixed(2)}%)
+            </div>
+          </div>
+        </div>
+
+        <!-- 4 Key Execution Metrics Cards -->
+        <div class="whale-kpi-grid" style="margin-bottom: 16px;">
+          <div class="whale-kpi-card">
+            <span class="kpi-label">OPTIMAL POSITION SIZE (${asset})</span>
+            <span class="kpi-val text-cyan">$${Math.round(setup.positionNotionalUsd).toLocaleString()}</span>
+            <span class="kpi-sub">${setup.positionSizeCoins.toFixed(4)} ${asset} · Exact $${Math.round(setup.maxRiskDollarUsd)} max loss at Stop</span>
+          </div>
+
+          <div class="whale-kpi-card">
+            <span class="kpi-label">WALL-PROTECTED STOP-LOSS</span>
+            <span class="kpi-val ${this.execDirection === "LONG" ? "text-red" : "text-green"}">${fmtPrice(setup.protectedStopLoss)}</span>
+            <span class="kpi-sub">Distance: ${setup.stopDistancePercent.toFixed(2)}% (Behind L2 Wall + 0.45×ATR)</span>
+          </div>
+
+          <div class="whale-kpi-card">
+            <span class="kpi-label">HALF-KELLY &amp; SAFE LEVERAGE</span>
+            <span class="kpi-val text-amber">${setup.recommendedLeverage}x LEV</span>
+            <span class="kpi-sub">Half-Kelly Optimal Fraction: ${setup.kellyFractionPercent.toFixed(1)}% of capital</span>
+          </div>
+
+          <div class="whale-kpi-card">
+            <span class="kpi-label">PRIMARY LIQUIDATION MAGNET</span>
+            <span class="kpi-val ${magnets.primaryMagnet.side === "SHORT_LIQ_MAGNET" ? "text-green" : "text-red"}">${fmtPrice(magnets.primaryMagnet.priceLevel)}</span>
+            <span class="kpi-sub">${magnets.primaryMagnet.tier} ${magnets.primaryMagnet.side === "SHORT_LIQ_MAGNET" ? "Short Squeeze" : "Long Flush"} ($${(magnets.primaryMagnet.estimatedPoolUsd / 1e6).toFixed(1)}M Pool)</span>
+          </div>
+        </div>
+
+        <!-- Two-Column Institutional Execution Ticket & Liquidation Magnet Ladder -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px;">
+          <!-- Left: Actionable Trade Ticket -->
+          <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
+              <span style="font-weight: 700; color: var(--amber-bright); letter-spacing: 0.06em;">🎯 INSTITUTIONAL EXECUTION TICKET (${sym})</span>
+              <span class="badge ${this.execDirection === "LONG" ? "badge-green" : "badge-red"}">${this.execDirection} ${setup.recommendedLeverage}x</span>
+            </div>
+
+            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 14px; line-height: 1.5; background: var(--bg-panel); padding: 10px; border-radius: 4px; border-left: 3px solid var(--amber-bright);">
+              <strong>STOP-LOSS SHIELD RATIONALE:</strong> ${setup.setupRationale}
+            </div>
+
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>EXECUTION LEVEL</th>
+                  <th>TARGET PRICE</th>
+                  <th>DISTANCE</th>
+                  <th>NET PnL ($)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>⚡ LIMIT / MKT ENTRY</strong></td>
+                  <td class="text-cyan"><strong>${fmtPrice(setup.optimalEntryPrice)}</strong></td>
+                  <td>0.00% (Stoikov Skew)</td>
+                  <td>$0</td>
+                </tr>
+                <tr>
+                  <td><strong class="text-red">🛡️ PROTECTED STOP-LOSS (-1.0R)</strong></td>
+                  <td class="text-red"><strong>${fmtPrice(setup.protectedStopLoss)}</strong></td>
+                  <td class="text-red">-${setup.stopDistancePercent.toFixed(2)}%</td>
+                  <td class="text-red">-$${Math.round(setup.maxRiskDollarUsd).toLocaleString()}</td>
+                </tr>
+                <tr>
+                  <td><strong class="text-green">✅ TAKE PROFIT 1 (+1.5R Conservative)</strong></td>
+                  <td class="text-green"><strong>${fmtPrice(setup.takeProfit1_15R)}</strong></td>
+                  <td class="text-green">+${(setup.stopDistancePercent * 1.5).toFixed(2)}%</td>
+                  <td class="text-green">+$${Math.round(setup.maxRiskDollarUsd * 1.5).toLocaleString()}</td>
+                </tr>
+                <tr>
+                  <td><strong class="text-green">🚀 TAKE PROFIT 2 (+2.5R Core Target)</strong></td>
+                  <td class="text-green"><strong>${fmtPrice(setup.takeProfit2_25R)}</strong></td>
+                  <td class="text-green">+${(setup.stopDistancePercent * 2.5).toFixed(2)}%</td>
+                  <td class="text-green">+$${Math.round(setup.maxRiskDollarUsd * 2.5).toLocaleString()}</td>
+                </tr>
+                <tr>
+                  <td><strong class="text-amber">🧲 TAKE PROFIT 3 (50x Liq Magnet)</strong></td>
+                  <td class="text-amber"><strong>${fmtPrice(setup.takeProfit3_Magnet)}</strong></td>
+                  <td class="text-amber">${(((setup.takeProfit3_Magnet - setup.optimalEntryPrice) / setup.optimalEntryPrice) * 100).toFixed(2)}%</td>
+                  <td class="text-amber">+$${Math.round(Math.abs(setup.takeProfit3_Magnet - setup.optimalEntryPrice) * setup.positionSizeCoins).toLocaleString()}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Right: Liquidation Magnet Cluster Map -->
+          <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 16px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
+              <span style="font-weight: 700; color: var(--cyan-bright); letter-spacing: 0.06em;">🧲 LIQUIDATION MAGNET HEATMAP (OI CLUSTER POOLS)</span>
+              <span style="font-size: 11px; color: var(--text-muted);">OI: $${(oiUsd / 1e9).toFixed(2)}B</span>
+            </div>
+
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>CLUSTER POOL</th>
+                  <th>MAGNET PRICE</th>
+                  <th>DIST %</th>
+                  <th>EST. POOL ($)</th>
+                  <th>GRAVITY</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${allMagnetZones
+                  .map((z) => {
+                    const isShortLiq = z.side === "SHORT_LIQ_MAGNET";
+                    const barColor = isShortLiq
+                      ? "var(--green-bright)"
+                      : "var(--red-bright)";
+                    return `
+                    <tr>
+                      <td>
+                        <span class="${isShortLiq ? "text-green" : "text-red"}" style="font-weight: 700;">
+                          ${isShortLiq ? "🔼" : "🔽"} ${z.tier} ${isShortLiq ? "SHORT SQUEEZE" : "LONG FLUSH"}
+                        </span>
+                      </td>
+                      <td><strong>${fmtPrice(z.priceLevel)}</strong></td>
+                      <td class="${z.distancePercent >= 0 ? "text-green" : "text-red"}">
+                        ${z.distancePercent >= 0 ? "+" : ""}${z.distancePercent.toFixed(2)}%
+                      </td>
+                      <td>$${(z.estimatedPoolUsd / 1e6).toFixed(1)}M</td>
+                      <td style="width: 110px;">
+                        <div style="background: var(--bg-void); height: 8px; border-radius: 4px; overflow: hidden;">
+                          <div style="width: ${z.gravityScore}%; height: 100%; background: ${barColor};"></div>
+                        </div>
+                      </td>
+                    </tr>
+                  `;
+                  })
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `;
+
+    // Bind events for EXEC screen
+    container.querySelectorAll(".btn-exec-sym").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const s = (e.currentTarget as HTMLElement).getAttribute("data-sym");
+        if (s) {
+          playCommandGo();
+          this.execSymbol = s;
+          if (this.orderbookService.getSymbol() !== s) {
+            this.orderbookService.switchSymbol(s);
+          }
+          this.renderExecScreen(container);
+        }
+      });
+    });
+
+    document.getElementById("btn-exec-long")?.addEventListener("click", () => {
+      playCommandGo();
+      this.execDirection = "LONG";
+      this.renderExecScreen(container);
+    });
+
+    document.getElementById("btn-exec-short")?.addEventListener("click", () => {
+      playCommandGo();
+      this.execDirection = "SHORT";
+      this.renderExecScreen(container);
+    });
+
+    const balInput = document.getElementById(
+      "input-exec-balance",
+    ) as HTMLInputElement | null;
+    balInput?.addEventListener("change", () => {
+      const val = parseFloat(balInput.value);
+      if (Number.isFinite(val) && val >= 50) {
+        this.execBalanceUsd = val;
+        this.renderExecScreen(container);
+      }
+    });
+
+    container.querySelectorAll(".btn-exec-risk").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const r = parseFloat(
+          (e.currentTarget as HTMLElement).getAttribute("data-risk") || "1.0",
+        );
+        if (Number.isFinite(r) && r > 0) {
+          playCommandGo();
+          this.execRiskPercent = r;
+          this.renderExecScreen(container);
+        }
+      });
+    });
+  }
+
+  // ==========================================
+  // SCREEN: DERIVATIVES OPTIONS GAMMA, OI REGIME & CVD SCANNER (DERIV <GO>)
+  // ==========================================
+  private renderDerivScreen(container: HTMLElement): void {
+    const btcOpt = this.derivService.getOptionsSnapshot("BTC");
+    const ethOpt = this.derivService.getOptionsSnapshot("ETH");
+
+    const oiSnap = this.onChainService.getSnapshot();
+
+    const positioningRows = this.derivService.buildPositioningMatrix(
+      this.tickers,
+      this.fundingRates,
+      this.whaleStream.getWhaleTrades(),
+      oiSnap.openInterest,
+    );
+
+    const regimeBadge = (regime: string) => {
+      if (regime === "LONG_BUILDUP")
+        return `<span class="badge badge-green">🟢 LONG BUILDUP (TREND UP)</span>`;
+      if (regime === "SHORT_COVERING")
+        return `<span class="badge badge-cyan">⚡ SHORT COVERING (SQUEEZE)</span>`;
+      if (regime === "SHORT_BUILDUP")
+        return `<span class="badge badge-red">🔴 SHORT BUILDUP (BEARISH)</span>`;
+      return `<span class="badge badge-amber">🧹 LONG CAPITULATION (FLUSH)</span>`;
+    };
+
+    const divBadge = (div: string, rvol: number) => {
+      if (div === "BULLISH_CVD_DIV")
+        return `<span class="text-green" style="font-weight:700;">🟢 BULLISH WHALE ABSORPTION (${rvol.toFixed(2)}x RVOL)</span>`;
+      if (div === "BEARISH_CVD_DIV")
+        return `<span class="text-red" style="font-weight:700;">🔴 BEARISH DISTRIBUTION (${rvol.toFixed(2)}x RVOL)</span>`;
+      if (div === "RVOL_BREAKOUT")
+        return `<span class="text-amber" style="font-weight:700;">🔥 HIGH RVOL EXPANSION (${rvol.toFixed(2)}x RVOL)</span>`;
+      return `<span class="text-muted">${rvol.toFixed(2)}x RVOL · NEUTRAL</span>`;
+    };
+
+    container.innerHTML = `
+      <div class="terminal-screen screen-deriv">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">🦅 DERIVATIVES OPTIONS GAMMA WALLS, SMART MONEY POSITIONING &amp; 4-QUADRANT OI REGIME</h2>
+            <span class="screen-subtitle">LIVE DERIBIT OPTIONS MAX PAIN &amp; CALL/PUT GAMMA WALLS · TOP TRADER VS RETAIL L/S · CVD DIVERGENCE SCANNER</span>
+          </div>
+          <div class="header-stat-pills">
+            <button id="btn-refresh-deriv" class="terminal-btn-sm">🔄 REFRESH DERIBIT &amp; OI</button>
+          </div>
+        </div>
+
+        <!-- Section 1: Deribit Institutional Options Intelligence (BTC & ETH) -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 16px; margin-bottom: 18px;">
+          ${[btcOpt, ethOpt]
+            .map(
+              (opt) => `
+            <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 15px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
+                <span style="font-weight: 700; color: var(--amber-bright); font-size: 13px;">
+                  🏛️ DERIBIT ${opt.currency} OPTIONS GAMMA &amp; MAX PAIN MATRIX
+                </span>
+                <span class="badge ${opt.dealerGammaRegime.includes("PIN") ? "badge-green" : opt.dealerGammaRegime.includes("SQUEEZE") ? "badge-cyan" : "badge-red"}">
+                  ${opt.dealerGammaRegime.replace(/_/g, " ")}
+                </span>
+              </div>
+
+              <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 10px;">
+                <div style="background: var(--bg-panel); padding: 8px; border-radius: 4px;">
+                  <div style="font-size: 10px; color: var(--text-muted);">MAX PAIN STRIKE</div>
+                  <div style="font-size: 15px; font-weight: 700; color: var(--amber-bright);">$${opt.maxPainStrike.toLocaleString()}</div>
+                  <div style="font-size: 10px; color: var(--text-secondary);">Expiry Magnet</div>
+                </div>
+
+                <div style="background: var(--bg-panel); padding: 8px; border-radius: 4px;">
+                  <div style="font-size: 10px; color: var(--text-muted);">CALL WALL (CEILING)</div>
+                  <div style="font-size: 15px; font-weight: 700; color: var(--green-bright);">$${opt.callWallStrike.toLocaleString()}</div>
+                  <div style="font-size: 10px; color: var(--text-secondary);">Dealer Short Gamma</div>
+                </div>
+
+                <div style="background: var(--bg-panel); padding: 8px; border-radius: 4px;">
+                  <div style="font-size: 10px; color: var(--text-muted);">PUT WALL (FLOOR)</div>
+                  <div style="font-size: 15px; font-weight: 700; color: var(--red-bright);">$${opt.putWallStrike.toLocaleString()}</div>
+                  <div style="font-size: 10px; color: var(--text-secondary);">Dealer Support</div>
+                </div>
+
+                <div style="background: var(--bg-panel); padding: 8px; border-radius: 4px;">
+                  <div style="font-size: 10px; color: var(--text-muted);">PUT/CALL RATIO &amp; IV</div>
+                  <div style="font-size: 15px; font-weight: 700; color: var(--cyan-bright);">${opt.putCallRatio.toFixed(2)} PCR</div>
+                  <div style="font-size: 10px; color: var(--text-secondary);">IV: ${opt.meanImpliedVolPercent.toFixed(1)}% · $${(opt.totalOptionsNotionalUsd / 1e9).toFixed(2)}B OI</div>
+                </div>
+              </div>
+            </div>
+          `,
+            )
+            .join("")}
+        </div>
+
+        <!-- Section 2: 4-Quadrant OI Regime, Smart Money vs Retail & RVOL/CVD Scanner -->
+        <div class="market-matrix-table-wrap">
+          <table class="terminal-table">
+            <thead>
+              <tr>
+                <th>ASSET</th>
+                <th>PRICE &amp; 24H</th>
+                <th>OPEN INTEREST &amp; 4H Δ</th>
+                <th>4-QUADRANT OI REGIME</th>
+                <th>SMART MONEY L/S</th>
+                <th>RETAIL CROWD L/S</th>
+                <th>RVOL &amp; CVD DIVERGENCE</th>
+                <th>QUANT ACTIONABLE CALL</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${positioningRows
+                .map((r) => {
+                  const pFmt =
+                    r.price < 10
+                      ? `$${r.price.toFixed(4)}`
+                      : `$${r.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                  return `
+                  <tr>
+                    <td><strong>${r.asset}</strong></td>
+                    <td>
+                      <strong>${pFmt}</strong>
+                      <span class="${r.priceChange24h >= 0 ? "text-green" : "text-red"}" style="margin-left: 6px;">
+                        ${r.priceChange24h >= 0 ? "+" : ""}${r.priceChange24h.toFixed(2)}%
+                      </span>
+                    </td>
+                    <td>
+                      <strong>$${(r.openInterestUsd / 1e6).toFixed(0)}M</strong>
+                      <span class="${r.oiChangePercent4h >= 0 ? "text-green" : "text-red"}" style="margin-left: 6px;">
+                        (${r.oiChangePercent4h >= 0 ? "+" : ""}${r.oiChangePercent4h.toFixed(2)}%)
+                      </span>
+                    </td>
+                    <td>${regimeBadge(r.oiRegime)}</td>
+                    <td>
+                      <span class="${r.smartMoneyLongPercent >= 55 ? "text-green" : "text-red"}" style="font-weight: 700;">
+                        ${r.smartMoneyLongPercent.toFixed(1)}% L
+                      </span>
+                      <span class="text-muted"> / ${(100 - r.smartMoneyLongPercent).toFixed(1)}% S</span>
+                    </td>
+                    <td>
+                      <span class="text-secondary">
+                        ${r.retailLongPercent.toFixed(1)}% L / ${(100 - r.retailLongPercent).toFixed(1)}% S
+                      </span>
+                    </td>
+                    <td>${divBadge(r.divergenceSignal, r.rvolMultiple)}</td>
+                    <td style="font-size: 11px; color: var(--text-primary);">${r.actionableCall}</td>
+                  </tr>
+                `;
+                })
+                .join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    document
+      .getElementById("btn-refresh-deriv")
+      ?.addEventListener("click", () => {
+        playCommandGo();
+        this.derivService.fetchLiveDeribitOptions().then(() => {
+          this.renderDerivScreen(container);
+        });
+      });
+  }
+
+  // ==========================================
   // SCREEN: HELP & GRAMMAR
   // ==========================================
   private renderHelpScreen(container: HTMLElement): void {
@@ -2653,6 +3201,21 @@ class ApexWebTerminal {
           <div class="help-card">
             <span class="help-cmd">CHART &lt;GO&gt; [F5]</span>
             <p>60 FPS high-frequency HTML5 Canvas candlestick chart with VWAP and horizontal Volume Profile (POC).</p>
+          </div>
+
+          <div class="help-card">
+            <span class="help-cmd">BOOK &lt;GO&gt;</span>
+            <p>100ms L2 Orderbook Depth, Stoikov Micro-Price skew (bps), Liquidity Wall Detector, and $500K slippage estimator.</p>
+          </div>
+
+          <div class="help-card">
+            <span class="help-cmd">EXEC &lt;GO&gt;</span>
+            <p>Quant Execution Calculator: Wall-Protected Stop-Loss (L2 Wall + ATR), Half-Kelly Position Sizer, and 25x-100x Liquidation Magnets.</p>
+          </div>
+
+          <div class="help-card">
+            <span class="help-cmd">DERIV &lt;GO&gt;</span>
+            <p>Live Deribit Options Max Pain &amp; Gamma Walls, 4-Quadrant OI Regime Matrix, Smart Money vs Retail L/S, and CVD Divergence Scanner.</p>
           </div>
 
           <div class="help-card">
