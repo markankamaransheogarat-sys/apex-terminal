@@ -9,7 +9,7 @@
     "apex": "./bin/apex.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && esbuild src/web/app.ts --bundle --format=esm --outfile=dist/web.js --platform=browser",
     "test": "node --import tsx --test tests/**/*.test.ts tests/**/*.test.js",
     "test:audio": "node --test tests/audio.test.js",
     "terminal": "node --import tsx src/index.ts",
@@ -29,6 +29,7 @@
   "license": "Apache-2.0",
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "esbuild": "^0.28.2",
     "tsx": "^4.23.15",
     "typescript": "^5.8.2"
   }

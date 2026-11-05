@@ -211,12 +211,21 @@ export class BinanceWsFeedManager {
     const quoteVolume = parseFloat(raw.q) || 0;
     const bidPrice = raw.b ? parseFloat(raw.b) : undefined;
     const askPrice = raw.a ? parseFloat(raw.a) : undefined;
+    const bidQty = raw.B ? parseFloat(raw.B) : undefined;
+    const askQty = raw.A ? parseFloat(raw.A) : undefined;
+    const orderflowBuyRatio =
+      bidQty !== undefined && askQty !== undefined && bidQty + askQty > 0
+        ? (bidQty / (bidQty + askQty)) * 100
+        : undefined;
 
     return {
       symbol,
       price,
       bidPrice,
       askPrice,
+      bidQty,
+      askQty,
+      orderflowBuyRatio,
       high24h: high,
       low24h: low,
       volume24h: volume,

@@ -11,6 +11,9 @@ export interface MarketTicker {
   price: number;
   bidPrice?: number;
   askPrice?: number;
+  bidQty?: number;
+  askQty?: number;
+  orderflowBuyRatio?: number;
   high24h: number;
   low24h: number;
   volume24h: number;

@@ -188,11 +188,23 @@ export class RestFallbackService {
       for (const raw of rawList) {
         const symbol = String(raw.symbol).toUpperCase();
         if (targetSymbols.has(symbol)) {
+          const bidPrice = raw.bidPrice ? parseFloat(raw.bidPrice) : undefined;
+          const askPrice = raw.askPrice ? parseFloat(raw.askPrice) : undefined;
+          const bidQty = raw.bidQty ? parseFloat(raw.bidQty) : undefined;
+          const askQty = raw.askQty ? parseFloat(raw.askQty) : undefined;
+          const orderflowBuyRatio =
+            bidQty !== undefined && askQty !== undefined && bidQty + askQty > 0
+              ? (bidQty / (bidQty + askQty)) * 100
+              : undefined;
+
           const ticker: MarketTicker = {
             symbol,
             price: parseFloat(raw.lastPrice) || 0,
-            bidPrice: raw.bidPrice ? parseFloat(raw.bidPrice) : undefined,
-            askPrice: raw.askPrice ? parseFloat(raw.askPrice) : undefined,
+            bidPrice,
+            askPrice,
+            bidQty,
+            askQty,
+            orderflowBuyRatio,
             high24h: parseFloat(raw.highPrice) || 0,
             low24h: parseFloat(raw.lowPrice) || 0,
             volume24h: parseFloat(raw.volume) || 0,

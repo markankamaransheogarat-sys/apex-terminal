@@ -725,6 +725,199 @@
         color: var(--text-muted);
       }
 
+      /* Portfolio preset selector bar */
+      .portfolio-selector-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+        background: #060910;
+        border: 1px solid var(--crt-border);
+        border-radius: 6px;
+        padding: 8px 12px;
+        margin-bottom: 12px;
+      }
+
+      .selector-label {
+        font-size: 0.68rem;
+        font-weight: 800;
+        color: var(--amber);
+        letter-spacing: 0.05em;
+        white-space: nowrap;
+      }
+
+      .preset-chip {
+        background: var(--crt-elevated);
+        border: 1px solid var(--crt-border);
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        padding: 4px 10px;
+        border-radius: 4px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        transition: all 0.15s ease;
+      }
+
+      .preset-chip:hover {
+        border-color: var(--crt-border-bright);
+        color: var(--text-main);
+      }
+
+      .preset-chip.active {
+        background: rgba(0, 216, 255, 0.15);
+        border-color: var(--cyan);
+        color: var(--cyan);
+      }
+
+      .preset-badge {
+        font-size: 0.62rem;
+        background: rgba(255, 255, 255, 0.08);
+        padding: 1px 4px;
+        border-radius: 3px;
+        color: var(--amber);
+      }
+
+      .real-source-banner {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.7rem;
+        color: var(--text-muted);
+        background: rgba(0, 255, 102, 0.04);
+        border: 1px solid rgba(0, 255, 102, 0.2);
+        border-radius: 4px;
+        padding: 6px 12px;
+        margin-bottom: 12px;
+        flex-wrap: wrap;
+      }
+
+      .live-pulse {
+        width: 6px;
+        height: 6px;
+        background: var(--green);
+        border-radius: 50%;
+        display: inline-block;
+        box-shadow: 0 0 8px var(--green);
+        animation: pulse 1.5s infinite;
+      }
+
+      .returns-badge {
+        margin-left: auto;
+        font-size: 0.65rem;
+        font-weight: 700;
+        padding: 2px 6px;
+        border-radius: 3px;
+      }
+
+      .badge-live {
+        background: rgba(0, 255, 102, 0.15);
+        color: var(--green);
+        border: 1px solid var(--green);
+      }
+
+      .badge-calibrated {
+        background: rgba(255, 153, 0, 0.15);
+        color: var(--amber);
+        border: 1px solid var(--amber);
+      }
+
+      .bias-text {
+        font-size: 0.65rem;
+        color: var(--text-dim);
+        margin-left: 6px;
+        white-space: nowrap;
+      }
+
+      /* Portfolio Editor Box */
+      .portfolio-editor-box {
+        background: #070b12;
+        border: 1px solid var(--amber);
+        border-radius: 6px;
+        padding: 14px;
+        margin-bottom: 14px;
+      }
+
+      .editor-grid {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .editor-row {
+        display: grid;
+        grid-template-columns: 100px 140px 140px 80px 40px;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .form-input {
+        background: #020305;
+        border: 1px solid var(--crt-border-bright);
+        color: var(--text-main);
+        font-family: var(--font-mono);
+        font-size: 0.78rem;
+        padding: 4px 8px;
+        border-radius: 3px;
+      }
+
+      .form-input:focus {
+        border-color: var(--amber);
+        outline: none;
+      }
+
+      .btn-danger-sm {
+        background: rgba(255, 51, 68, 0.15);
+        border: 1px solid var(--red);
+        color: var(--red);
+        cursor: pointer;
+        font-weight: bold;
+        border-radius: 3px;
+        padding: 3px 6px;
+      }
+
+      .editor-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .btn-amber {
+        background: rgba(255, 153, 0, 0.15);
+        border: 1px solid var(--amber);
+        color: var(--amber);
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        font-weight: bold;
+        padding: 6px 12px;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+
+      .btn-amber:hover {
+        background: var(--amber);
+        color: #000;
+      }
+
+      .btn-secondary {
+        background: var(--crt-elevated);
+        border: 1px solid var(--crt-border);
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        padding: 6px 12px;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+
+      .td-bias {
+        display: flex;
+        align-items: center;
+      }
+
       .mt-3 {
         margin-top: 12px;
       }
