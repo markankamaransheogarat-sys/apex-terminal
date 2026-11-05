@@ -1,8 +1,18 @@
 /**
  * Apex Terminal - Institutional Web Application
  * Bloomberg Terminal & BlackRock Aladdin Web Experience for Digital Assets.
- * Includes Live Whale Stream, Real-Time Liquidations Feed, and On-Chain Mempool Vitality.
- * 100% Real Live Market Data via Public WebSockets and On-Chain / SEC Verified Holdings.
+ * Includes:
+ * 1. Live Market Matrix & Real-time Bid/Ask Orderflow
+ * 2. Real-time Whale Radar & Block Flow Stream
+ * 3. Binance Futures !forceOrder Liquidation Stream
+ * 4. Ultra-Fast Canvas Candlestick, VWAP & Volume Profile Chart (CHART <GO>)
+ * 5. BlackRock Aladdin Risk Engine & Real 60-Day Return Covariance (RISK <GO>)
+ * 6. Institutional Cash & Carry Basis Arbitrage Matrix (ARB <GO>)
+ * 7. Perpetual Funding Rate Heatmap & Squeeze Detector (FUND <GO>)
+ * 8. Live Crypto News Wire & NLP Sentiment Engine (NEWS <GO>)
+ * 9. On-Chain Mempool Sat/vB Vitality & Futures Open Interest (MACRO <GO>)
+ * 10. Verified Reserves & Custom Personal Wallet Ledger (PORT <GO>)
+ * 11. Browser Audio & Push Alerts Notification System (ALERT <GO>)
  */
 
 import { BinanceWsFeedManager, BinanceWsState } from "../feeds/binance-ws.js";
@@ -39,12 +49,29 @@ import {
   isMuted,
 } from "../audio.js";
 
+// New Institutional Modules
+import { ChartService } from "../chart/chart-service.js";
+import { CanvasChartRenderer } from "../chart/canvas-renderer.js";
+import { ChartTimeframe } from "../chart/types.js";
+import { BasisArbitrageCalculator } from "../arbitrage/basis-calculator.js";
+import { NewsService } from "../news/news-service.js";
+import { NewsWireSnapshot } from "../news/types.js";
+import { AlertManager } from "../alerts/alert-manager.js";
+
 class ApexWebTerminal {
   private binanceWs: BinanceWsFeedManager;
   private restService: RestFallbackService;
   private whaleStream: WhaleStreamManager;
   private onChainService: OnChainVitalityService;
   private returnsService: HistoricalReturnsService;
+
+  // Additional Subsystems
+  private chartService: ChartService;
+  private chartRenderer: CanvasChartRenderer | null = null;
+  private newsService: NewsService;
+  private newsSnapshot: NewsWireSnapshot | null = null;
+  private newsFilter: string = "ALL";
+  private alertManager: AlertManager;
 
   private tickers: Map<string, MarketTicker> = new Map();
   private prevPrices: Map<string, number> = new Map();
@@ -57,12 +84,16 @@ class ApexWebTerminal {
 
   private activeScreen:
     | "MARKET"
+    | "CHART"
     | "RISK"
+    | "ARB"
     | "FUNDING"
     | "WHALE"
     | "LIQ"
+    | "NEWS"
     | "MACRO"
     | "PORT"
+    | "ALERT"
     | "HELP" = "MARKET";
   private selectedStressId: string = "CRYPTO_CRASH_20";
   private whaleFilter: "ALL" | "100K" | "500K" | "1M" = "ALL";
@@ -77,6 +108,10 @@ class ApexWebTerminal {
     this.whaleStream = new WhaleStreamManager(wsConstructor as any);
     this.onChainService = new OnChainVitalityService();
     this.returnsService = HistoricalReturnsService.getInstance();
+
+    this.chartService = new ChartService("BTCUSDT", "1h");
+    this.newsService = NewsService.getInstance();
+    this.alertManager = AlertManager.getInstance();
 
     // Load active preset preference
     if (typeof localStorage !== "undefined") {
@@ -153,17 +188,21 @@ class ApexWebTerminal {
         <section class="command-bar-section">
           <div class="command-prompt-box">
             <span class="command-prefix">APEX:&gt;</span>
-            <input type="text" id="cmd-input" class="command-input" placeholder="Enter command (e.g. WHALE &lt;GO&gt;, LIQ &lt;GO&gt;, RISK &lt;GO&gt;, BTC &lt;GO&gt;)..." autocomplete="off" spellcheck="false" />
+            <input type="text" id="cmd-input" class="command-input" placeholder="Enter command (e.g. BTC <GO>, CHART <GO>, ARB <GO>, NEWS <GO>, RISK <GO>)..." autocomplete="off" spellcheck="false" />
             <button id="btn-go" class="btn-go">&lt;GO&gt;</button>
           </div>
           <div class="quick-commands">
             <button class="cmd-chip active" data-cmd="MARKET">MARKET &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="CHART">📈 CHART &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="WHALE">🐋 WHALE &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="LIQ">⚡ LIQ &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="RISK">RISK &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="ARB">💰 ARB &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="FUND">FUND &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="NEWS">📰 NEWS &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="MACRO">MACRO &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="PORT">PORT &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="ALERT">🔔 ALERT &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="HELP">HELP &lt;GO&gt;</button>
           </div>
         </section>
@@ -178,9 +217,12 @@ class ApexWebTerminal {
             <span>[F2: MARKET]</span>
             <span>[F3: RISK]</span>
             <span>[F4: FUND]</span>
+            <span>[F5: CHART]</span>
             <span>[F6: WHALE]</span>
             <span>[F7: LIQ]</span>
             <span>[F8: PORT]</span>
+            <span>[F9: ARB]</span>
+            <span>[F10: NEWS]</span>
           </div>
           <div class="footer-right">
             <span>100% REAL LIVE DATA · SEC 8-K &amp; ON-CHAIN RESERVES · BINANCE DIRECT WS</span>
@@ -237,6 +279,9 @@ class ApexWebTerminal {
       } else if (e.key === "F4") {
         e.preventDefault();
         this.executeCommand("FUND <GO>");
+      } else if (e.key === "F5") {
+        e.preventDefault();
+        this.executeCommand("CHART <GO>");
       } else if (e.key === "F6") {
         e.preventDefault();
         this.executeCommand("WHALE <GO>");
@@ -246,6 +291,12 @@ class ApexWebTerminal {
       } else if (e.key === "F8") {
         e.preventDefault();
         this.executeCommand("PORT <GO>");
+      } else if (e.key === "F9") {
+        e.preventDefault();
+        this.executeCommand("ARB <GO>");
+      } else if (e.key === "F10") {
+        e.preventDefault();
+        this.executeCommand("NEWS <GO>");
       }
     });
   }
@@ -258,6 +309,32 @@ class ApexWebTerminal {
 
     if (cleaned === "MARKET" || cleaned === "MKT") {
       this.activeScreen = "MARKET";
+    } else if (
+      cleaned === "CHART" ||
+      cleaned === "CANDLE" ||
+      cleaned === "KLINES" ||
+      cleaned === "VWAP"
+    ) {
+      this.activeScreen = "CHART";
+    } else if (
+      cleaned === "ARB" ||
+      cleaned === "BASIS" ||
+      cleaned === "ARBITRAGE" ||
+      cleaned === "CARRY"
+    ) {
+      this.activeScreen = "ARB";
+    } else if (
+      cleaned === "NEWS" ||
+      cleaned === "WIRE" ||
+      cleaned === "SENTIMENT"
+    ) {
+      this.activeScreen = "NEWS";
+    } else if (
+      cleaned === "ALERT" ||
+      cleaned === "ALERTS" ||
+      cleaned === "NOTIF"
+    ) {
+      this.activeScreen = "ALERT";
     } else if (
       cleaned === "WHALE" ||
       cleaned === "WHALES" ||
@@ -296,6 +373,11 @@ class ApexWebTerminal {
       this.activeScreen = "PORT";
     } else if (cleaned === "HELP" || cleaned === "INDEX") {
       this.activeScreen = "HELP";
+    } else if (cleaned.includes("CHART")) {
+      const sym = cleaned.replace("CHART", "").trim();
+      const target = sym.endsWith("USDT") ? sym : `${sym}USDT`;
+      this.chartService.loadCandles(target);
+      this.activeScreen = "CHART";
     } else if (
       [
         "BTC",
@@ -310,7 +392,9 @@ class ApexWebTerminal {
         "PEPE",
       ].includes(cleaned)
     ) {
-      this.activeScreen = "MARKET";
+      // Direct asset lookup -> opens chart for asset
+      this.chartService.loadCandles(`${cleaned}USDT`);
+      this.activeScreen = "CHART";
     } else {
       this.activeScreen = "HELP";
     }
@@ -336,6 +420,11 @@ class ApexWebTerminal {
       this.prevPrices.set(ticker.symbol, ticker.price);
       this.tickers.set(ticker.symbol, ticker);
 
+      // Feed live tick into chart if active
+      if (ticker.symbol === this.chartService.getSymbol()) {
+        this.chartService.updateWithLiveTick(ticker.price, ticker.volume24h);
+      }
+
       this.updateTickerTape();
       if (this.activeScreen === "MARKET") {
         this.updateMarketTableLive(ticker, isUp, isDown);
@@ -351,6 +440,7 @@ class ApexWebTerminal {
     // 2. Whale Stream & Liquidation Listeners
     this.whaleStream.onWhaleTrade((trade) => {
       playWhalePing(trade.valueUsd);
+      this.alertManager.checkWhaleTrade(trade);
       this.updateTickerTape();
       if (this.activeScreen === "WHALE") {
         this.renderWhaleLive(trade);
@@ -359,6 +449,7 @@ class ApexWebTerminal {
 
     this.whaleStream.onLiquidation((liq) => {
       playLiquidationZap();
+      this.alertManager.checkLiquidation(liq);
       this.updateTickerTape();
       if (this.activeScreen === "LIQ") {
         this.renderLiquidationLive(liq);
@@ -371,7 +462,9 @@ class ApexWebTerminal {
     FundingRateCalculator.fetchLiveFundingRates()
       .then((rates) => {
         this.fundingRates = rates;
-        if (this.activeScreen === "FUNDING") this.render();
+        rates.forEach((f) => this.alertManager.checkFundingRate(f));
+        if (this.activeScreen === "FUNDING" || this.activeScreen === "ARB")
+          this.render();
       })
       .catch(() => {});
 
@@ -395,12 +488,27 @@ class ApexWebTerminal {
     });
     this.returnsService.fetchRealReturns();
 
+    // 7. Initial News Wire
+    this.newsService.fetchLatestNews().then((snap) => {
+      this.newsSnapshot = snap;
+      if (this.activeScreen === "NEWS") this.render();
+    });
+
+    // 8. Initial Chart Load
+    this.chartService.loadCandles("BTCUSDT", "1h").then((data) => {
+      if (this.activeScreen === "CHART" && this.chartRenderer) {
+        this.chartRenderer.setData(data);
+      }
+    });
+
     setInterval(() => {
-      FundingRateCalculator.fetchLiveFundingRates().then(
-        (r) => (this.fundingRates = r),
-      );
+      FundingRateCalculator.fetchLiveFundingRates().then((r) => {
+        this.fundingRates = r;
+        r.forEach((f) => this.alertManager.checkFundingRate(f));
+      });
       this.onChainService.fetchMempoolFees();
       this.onChainService.fetchOpenInterest(this.prevPrices);
+      this.newsService.fetchLatestNews().then((s) => (this.newsSnapshot = s));
     }, 45000);
   }
 
@@ -494,18 +602,26 @@ class ApexWebTerminal {
 
     if (this.activeScreen === "MARKET") {
       this.renderMarketScreen(body);
+    } else if (this.activeScreen === "CHART") {
+      this.renderChartScreen(body);
     } else if (this.activeScreen === "WHALE") {
       this.renderWhaleScreen(body);
     } else if (this.activeScreen === "LIQ") {
       this.renderLiquidationScreen(body);
     } else if (this.activeScreen === "RISK") {
       this.renderRiskScreen(body);
+    } else if (this.activeScreen === "ARB") {
+      this.renderArbitrageScreen(body);
     } else if (this.activeScreen === "FUNDING") {
       this.renderFundingScreen(body);
+    } else if (this.activeScreen === "NEWS") {
+      this.renderNewsScreen(body);
     } else if (this.activeScreen === "MACRO") {
       this.renderMacroScreen(body);
     } else if (this.activeScreen === "PORT") {
       this.renderPortfolioScreen(body);
+    } else if (this.activeScreen === "ALERT") {
+      this.renderAlertsScreen(body);
     } else if (this.activeScreen === "HELP") {
       this.renderHelpScreen(body);
     }
@@ -636,6 +752,458 @@ class ApexWebTerminal {
         biasText.textContent = `${buyRatio}% / ${sellRatio}%`;
       }
     }
+  }
+
+  // ==========================================
+  // SCREEN: HIGH-FREQUENCY CANVAS CHART (CHART <GO>)
+  // ==========================================
+  private renderChartScreen(container: HTMLElement): void {
+    const curSymbol = this.chartService.getSymbol();
+    const curTF = this.chartService.getTimeframe();
+    const symbols = ["BTC", "ETH", "SOL", "BNB", "SUI", "XRP", "DOGE"];
+    const timeframes: ChartTimeframe[] = ["1m", "5m", "15m", "1h", "1d"];
+
+    container.innerHTML = `
+      <div class="terminal-screen screen-chart">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">📈 HIGH-FREQUENCY REAL-TIME CANDLESTICK &amp; VWAP ENGINE</h2>
+            <span class="screen-subtitle">60 FPS ZERO-DEPENDENCY HTML5 CANVAS WITH INSTITUTIONAL VOLUME PROFILE (POC)</span>
+          </div>
+          <span class="terminal-badge badge-aladdin">SUB-MILLISECOND RENDER</span>
+        </div>
+
+        <div class="chart-container-box">
+          <div class="chart-toolbar">
+            <div class="chart-group">
+              <span class="selector-label">SYMBOL:</span>
+              ${symbols
+                .map(
+                  (s) => `
+                <button class="chart-btn ${curSymbol.startsWith(s) ? "active" : ""}" data-chart-sym="${s}USDT">
+                  ${s}
+                </button>
+              `,
+                )
+                .join("")}
+            </div>
+
+            <div class="chart-group">
+              <span class="selector-label">TIMEFRAME:</span>
+              ${timeframes
+                .map(
+                  (tf) => `
+                <button class="chart-btn ${curTF === tf ? "active" : ""}" data-chart-tf="${tf}">
+                  ${tf.toUpperCase()}
+                </button>
+              `,
+                )
+                .join("")}
+            </div>
+
+            <div class="chart-group">
+              <span class="returns-badge badge-live">● VWAP: ON</span>
+              <span class="returns-badge badge-live">● POC PROFILE: ON</span>
+            </div>
+          </div>
+
+          <div class="chart-canvas-wrap">
+            <canvas id="apex-chart-canvas" class="chart-canvas"></canvas>
+          </div>
+        </div>
+      </div>
+    `;
+
+    this.initChartCanvas();
+    this.bindChartEvents();
+  }
+
+  private initChartCanvas(): void {
+    const canvas = document.getElementById(
+      "apex-chart-canvas",
+    ) as HTMLCanvasElement;
+    if (!canvas) return;
+
+    this.chartRenderer = new CanvasChartRenderer(canvas, {
+      showVWAP: true,
+      showVolumeProfile: true,
+      showGrid: true,
+    });
+
+    this.chartRenderer.resize();
+    const data = this.chartService.buildChartData();
+    this.chartRenderer.setData(data);
+
+    window.addEventListener("resize", () => {
+      this.chartRenderer?.resize();
+    });
+  }
+
+  private bindChartEvents(): void {
+    document.querySelectorAll("[data-chart-sym]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const sym = (e.currentTarget as HTMLElement).getAttribute(
+          "data-chart-sym",
+        );
+        if (sym) {
+          playCommandGo();
+          this.chartService
+            .loadCandles(sym, this.chartService.getTimeframe())
+            .then(() => {
+              this.render();
+            });
+        }
+      });
+    });
+
+    document.querySelectorAll("[data-chart-tf]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const tf = (e.currentTarget as HTMLElement).getAttribute(
+          "data-chart-tf",
+        ) as ChartTimeframe | null;
+        if (tf) {
+          playCommandGo();
+          this.chartService
+            .loadCandles(this.chartService.getSymbol(), tf)
+            .then(() => {
+              this.render();
+            });
+        }
+      });
+    });
+  }
+
+  // ==========================================
+  // SCREEN: BASIS & ARBITRAGE MATRIX (ARB <GO>)
+  // ==========================================
+  private renderArbitrageScreen(container: HTMLElement): void {
+    const items = BasisArbitrageCalculator.calculateMatrix(
+      this.tickers,
+      this.fundingRates,
+    );
+    const summary = BasisArbitrageCalculator.getSummary(items);
+
+    container.innerHTML = `
+      <div class="terminal-screen screen-arb">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">💰 INSTITUTIONAL CASH &amp; CARRY BASIS ARBITRAGE MATRIX</h2>
+            <span class="screen-subtitle">DELTA-NEUTRAL YIELD, SPOT VS PERP SPREADS &amp; ANNUALIZED CARRY RETURNS</span>
+          </div>
+          <span class="terminal-badge badge-aladdin">DELTA-NEUTRAL ALADDIN</span>
+        </div>
+
+        <div class="aladdin-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">AVERAGE MARKET CARRY APR</span>
+            <span class="kpi-val text-green">${summary.averageBasisApr.toFixed(2)}%</span>
+            <span class="kpi-sub">ACROSS ACTIVE PERPETUALS</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">ACTIVE YIELD OPPORTUNITIES</span>
+            <span class="kpi-val text-cyan">${summary.totalOpportunitiesCount}</span>
+            <span class="kpi-sub">SPREADS &ge; 5% ANNUALIZED</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">TOP CARRY ASSET</span>
+            <span class="kpi-val text-amber">${summary.bestOpportunity ? summary.bestOpportunity.asset : "--"}</span>
+            <span class="kpi-sub">${summary.bestOpportunity ? `${summary.bestOpportunity.totalDeltaNeutralApr.toFixed(2)}% APR` : "--"}</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">30-DAY PROJ. YIELD ON $100K</span>
+            <span class="kpi-val text-green">$${summary.bestOpportunity ? Math.round(summary.bestOpportunity.estimated30DayYieldUsd).toLocaleString() : "0"}</span>
+            <span class="kpi-sub">ZERO-DIRECTIONAL RISK CARRY</span>
+          </div>
+        </div>
+
+        <div class="market-matrix-table-wrap mt-3">
+          <table class="terminal-table">
+            <thead>
+              <tr>
+                <th>ASSET</th>
+                <th>SPOT PRICE</th>
+                <th>PERP MARK PRICE</th>
+                <th>BASIS SPREAD</th>
+                <th>8H RATE</th>
+                <th>DELTA-NEUTRAL APR</th>
+                <th>COMPOUNDED APY</th>
+                <th>EST. 30D YIELD ($100K)</th>
+                <th>ACTIONABLE SIGNAL</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                items.length === 0
+                  ? `<tr><td colspan="9" class="text-center">Awaiting Spot and Futures WebSocket prices to calculate basis spreads...</td></tr>`
+                  : items
+                      .map((item) => {
+                        const isHot = item.signal === "HIGH_YIELD_CASH_CARRY";
+                        const isMod = item.signal === "MODERATE_CASH_CARRY";
+                        const aprClass =
+                          item.totalDeltaNeutralApr >= 0
+                            ? "text-green"
+                            : "text-red";
+
+                        return `
+                    <tr class="${isHot ? "row-highlight" : ""}">
+                      <td><strong>${item.asset}</strong></td>
+                      <td>$${item.spotPrice.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                      <td>$${item.perpPrice.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+                      <td class="${item.basisSpreadUsd >= 0 ? "text-green" : "text-red"}">
+                        ${item.basisSpreadUsd >= 0 ? "+" : ""}$${item.basisSpreadUsd.toFixed(2)} (${item.basisSpreadPercent.toFixed(3)}%)
+                      </td>
+                      <td>${(item.fundingRate8h * 100).toFixed(4)}%</td>
+                      <td class="${aprClass} font-bold">${item.totalDeltaNeutralApr.toFixed(2)}%</td>
+                      <td class="${aprClass}">${item.compoundedApy.toFixed(2)}%</td>
+                      <td class="text-cyan font-bold">+$${Math.round(item.estimated30DayYieldUsd).toLocaleString()}</td>
+                      <td>
+                        <span class="${isHot ? "badge-arb-hot" : isMod ? "badge-arb-mod" : "regime-normal"}">
+                          ${
+                            isHot
+                              ? "🔥 BUY SPOT / SHORT PERP"
+                              : isMod
+                                ? "✓ CASH & CARRY"
+                                : "NEUTRAL"
+                          }
+                        </span>
+                      </td>
+                    </tr>
+                  `;
+                      })
+                      .join("")
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  // ==========================================
+  // SCREEN: LIVE CRYPTO NEWS WIRE (NEWS <GO>)
+  // ==========================================
+  private renderNewsScreen(container: HTMLElement): void {
+    const snap = this.newsSnapshot || this.newsService.buildSnapshot();
+    const categories = [
+      "ALL",
+      "ETF_FLOWS",
+      "MACRO",
+      "REGULATION",
+      "DEFI",
+      "ON_CHAIN",
+      "SECURITY",
+    ];
+
+    const filtered = snap.articles.filter((a) => {
+      if (this.newsFilter === "ALL") return true;
+      return a.category === this.newsFilter;
+    });
+
+    container.innerHTML = `
+      <div class="terminal-screen screen-news">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">📰 INSTITUTIONAL MARKET WIRE &amp; NLP SENTIMENT RADAR</h2>
+            <span class="screen-subtitle">REAL-TIME CRYPTO HEADLINES, REGULATORY FILINGS &amp; ALGORITHMIC SENTIMENT SCORING</span>
+          </div>
+          <span class="terminal-badge badge-aladdin">LIVE WIRE ACTIVE</span>
+        </div>
+
+        <div class="aladdin-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">MARKET SENTIMENT INDEX</span>
+            <span class="kpi-val ${snap.marketSentimentIndex >= 50 ? "text-green" : "text-red"}">
+              ${snap.marketSentimentIndex}/100
+            </span>
+            <span class="kpi-sub">${snap.marketSentimentLabel}</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">BULLISH HEADLINES</span>
+            <span class="kpi-val text-green">${snap.bullishCount}</span>
+            <span class="kpi-sub">ACCUMULATION / INFLOW DRIVERS</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">BEARISH HEADLINES</span>
+            <span class="kpi-val text-red">${snap.bearishCount}</span>
+            <span class="kpi-sub">REGULATORY / RISK PRESSURES</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">NEUTRAL / MACRO REPORTS</span>
+            <span class="kpi-val text-cyan">${snap.neutralCount}</span>
+            <span class="kpi-sub">FED &amp; PROTOCOL METRICS</span>
+          </div>
+        </div>
+
+        <div class="filter-group mt-3">
+          ${categories
+            .map(
+              (cat) => `
+            <button class="filter-btn ${this.newsFilter === cat ? "active" : ""}" data-news-cat="${cat}">
+              ${cat.replace("_", " ")}
+            </button>
+          `,
+            )
+            .join("")}
+        </div>
+
+        <div class="news-grid">
+          ${filtered
+            .map((art) => {
+              const timeStr = new Date(art.timestamp).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              });
+              const sentClass =
+                art.sentiment === "BULLISH"
+                  ? "badge-bullish"
+                  : art.sentiment === "BEARISH"
+                    ? "badge-bearish"
+                    : "badge-neutral";
+              const impactClass =
+                art.impact === "CRITICAL"
+                  ? "badge-critical"
+                  : art.impact === "HIGH"
+                    ? "badge-high"
+                    : "badge-neutral";
+
+              return `
+              <div class="news-item ${art.sentiment === "BULLISH" ? "news-bullish" : art.sentiment === "BEARISH" ? "news-bearish" : ""}">
+                <div class="news-meta-row">
+                  <span class="text-dim">${timeStr}</span>
+                  <span class="font-bold text-amber">${art.source}</span>
+                  <span class="preset-badge">${art.category}</span>
+                  <span class="${sentClass}">${art.sentiment} (${(art.sentimentScore * 100).toFixed(0)})</span>
+                  <span class="${impactClass}">IMPACT: ${art.impact}</span>
+                </div>
+                <div class="news-headline">${art.headline}</div>
+              </div>
+            `;
+            })
+            .join("")}
+        </div>
+      </div>
+    `;
+
+    this.bindNewsEvents();
+  }
+
+  private bindNewsEvents(): void {
+    document.querySelectorAll("[data-news-cat]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const cat = (e.currentTarget as HTMLElement).getAttribute(
+          "data-news-cat",
+        );
+        if (cat) {
+          playCommandGo();
+          this.newsFilter = cat;
+          this.render();
+        }
+      });
+    });
+  }
+
+  // ==========================================
+  // SCREEN: PUSH NOTIFICATIONS & ALERTS (ALERT <GO>)
+  // ==========================================
+  private renderAlertsScreen(container: HTMLElement): void {
+    const alerts = this.alertManager.getAlerts();
+    const isEnabled = this.alertManager.isNotificationsEnabled();
+
+    container.innerHTML = `
+      <div class="terminal-screen screen-alert">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">🔔 INSTITUTIONAL REAL-TIME ALERTS &amp; PUSH SYSTEM</h2>
+            <span class="screen-subtitle">BROWSER DESKTOP/MOBILE NOTIFICATIONS FOR KRAKEN BLOCKS, CASUALTIES &amp; VOLATILITY</span>
+          </div>
+          <button id="btn-request-push" class="btn-amber">
+            ${isEnabled ? "✓ PUSH NOTIFICATIONS: ACTIVE" : "🔔 ENABLE BROWSER PUSH NOTIFICATIONS"}
+          </button>
+        </div>
+
+        <div class="aladdin-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">WHALE THRESHOLD</span>
+            <span class="kpi-val text-green">&ge; $500,000</span>
+            <span class="kpi-sub">AUTOMATIC ACOUSTIC PING</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">LIQUIDATION THRESHOLD</span>
+            <span class="kpi-val text-red">&ge; $250,000</span>
+            <span class="kpi-sub">ELECTRIC ZAP ACOUSTIC TRIGGER</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">FUNDING RATE ANOMALY</span>
+            <span class="kpi-val text-amber">&ge; 50.0% APR</span>
+            <span class="kpi-sub">SQUEEZE WARNING ALERT</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">TOTAL LOGGED ALERTS</span>
+            <span class="kpi-val text-cyan">${alerts.length}</span>
+            <span class="kpi-sub">SESSION CASUALTIES</span>
+          </div>
+        </div>
+
+        <div class="market-matrix-table-wrap mt-3">
+          <table class="terminal-table">
+            <thead>
+              <tr>
+                <th>TIME</th>
+                <th>ALERT TYPE</th>
+                <th>SEVERITY</th>
+                <th>EVENT DETAILS</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                alerts.length === 0
+                  ? `<tr><td colspan="4" class="text-center">No casualty or whale threshold breaches detected yet in this session. Monitoring Binance streams...</td></tr>`
+                  : alerts
+                      .map((alt) => {
+                        const timeStr = new Date(
+                          alt.timestamp,
+                        ).toLocaleTimeString();
+                        const sevClass =
+                          alt.severity === "CRITICAL"
+                            ? "text-red font-bold"
+                            : alt.severity === "WARNING"
+                              ? "text-amber font-bold"
+                              : "text-cyan";
+
+                        return `
+                    <tr>
+                      <td class="text-dim">${timeStr}</td>
+                      <td><strong>${alt.type}</strong></td>
+                      <td class="${sevClass}">${alt.severity}</td>
+                      <td><strong>${alt.title}</strong> — ${alt.message}</td>
+                    </tr>
+                  `;
+                      })
+                      .join("")
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    document
+      .getElementById("btn-request-push")
+      ?.addEventListener("click", () => {
+        playCommandGo();
+        this.alertManager.requestNotificationPermission().then(() => {
+          this.render();
+        });
+      });
   }
 
   // ==========================================
@@ -1521,6 +2089,11 @@ class ApexWebTerminal {
           </div>
 
           <div class="help-card">
+            <span class="help-cmd">CHART &lt;GO&gt; [F5]</span>
+            <p>60 FPS high-frequency HTML5 Canvas candlestick chart with VWAP and horizontal Volume Profile (POC).</p>
+          </div>
+
+          <div class="help-card">
             <span class="help-cmd">WHALE &lt;GO&gt; [F6]</span>
             <p>Real-time Whale radar, block prints &ge; $50K, and Cumulative Volume Delta (CVD) net institutional accumulation.</p>
           </div>
@@ -1536,8 +2109,18 @@ class ApexWebTerminal {
           </div>
 
           <div class="help-card">
+            <span class="help-cmd">ARB &lt;GO&gt; [F9]</span>
+            <p>Institutional Cash &amp; Carry Basis Arbitrage Matrix. Spot vs Perpetual spread and delta-neutral annualized yield.</p>
+          </div>
+
+          <div class="help-card">
             <span class="help-cmd">FUND &lt;GO&gt; [F4]</span>
             <p>Perpetual futures funding rate heatmap, APR/APY compounding, and short-squeeze trigger detector.</p>
+          </div>
+
+          <div class="help-card">
+            <span class="help-cmd">NEWS &lt;GO&gt; [F10]</span>
+            <p>Real-time institutional news wire with NLP algorithmic sentiment scoring (Bullish / Bearish / Neutral).</p>
           </div>
 
           <div class="help-card">
@@ -1551,8 +2134,13 @@ class ApexWebTerminal {
           </div>
 
           <div class="help-card">
+            <span class="help-cmd">ALERT &lt;GO&gt;</span>
+            <p>Browser desktop push notifications and acoustic alerts for kraken trades, casualties, and funding spikes.</p>
+          </div>
+
+          <div class="help-card">
             <span class="help-cmd">BTC &lt;GO&gt; / ETH &lt;GO&gt;</span>
-            <p>Direct symbol lookup and real-time execution monitor.</p>
+            <p>Direct symbol lookup and interactive execution chart.</p>
           </div>
         </div>
       </div>

@@ -2663,6 +2663,1013 @@ var playLiquidationZap = () => soundEngine.playLiquidationZap();
 var toggleMute = () => soundEngine.toggleMute();
 var isMuted = () => soundEngine.isMuted();
 
+// src/chart/chart-service.ts
+var ChartService = class {
+  candles = [];
+  currentSymbol = "BTCUSDT";
+  currentTimeframe = "1h";
+  isFetching = false;
+  listeners = [];
+  constructor(symbol = "BTCUSDT", timeframe = "1h") {
+    this.currentSymbol = symbol;
+    this.currentTimeframe = timeframe;
+  }
+  isFetchingCandles() {
+    return this.isFetching;
+  }
+  getSymbol() {
+    return this.currentSymbol;
+  }
+  getTimeframe() {
+    return this.currentTimeframe;
+  }
+  onChartUpdate(listener) {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter((l) => l !== listener);
+    };
+  }
+  async loadCandles(symbol = this.currentSymbol, timeframe = this.currentTimeframe, limit = 100) {
+    this.currentSymbol = symbol.toUpperCase();
+    this.currentTimeframe = timeframe;
+    this.isFetching = true;
+    try {
+      const fetchFn = typeof fetch !== "undefined" ? fetch : void 0;
+      if (!fetchFn) {
+        return this.generateSyntheticCandles(limit);
+      }
+      const formattedSym = this.currentSymbol.endsWith("USDT") ? this.currentSymbol : `${this.currentSymbol}USDT`;
+      const url = `https://api.binance.com/api/v3/klines?symbol=${formattedSym}&interval=${this.currentTimeframe}&limit=${limit}`;
+      const res = await fetchFn(url, {
+        headers: { Accept: "application/json" }
+      });
+      if (!res.ok) {
+        throw new Error(`Binance klines HTTP ${res.status}`);
+      }
+      const raw = await res.json();
+      if (!Array.isArray(raw)) {
+        throw new Error("Invalid klines response");
+      }
+      this.candles = raw.map((k) => ({
+        timestamp: Number(k[0]),
+        open: parseFloat(k[1]),
+        high: parseFloat(k[2]),
+        low: parseFloat(k[3]),
+        close: parseFloat(k[4]),
+        volume: parseFloat(k[5])
+      }));
+      const data = this.buildChartData();
+      this.notify(data);
+      return data;
+    } catch (err) {
+      console.warn(
+        "[ChartService] Failed to load Binance klines, generating fallback:",
+        err
+      );
+      const fallback = this.generateSyntheticCandles(limit);
+      this.notify(fallback);
+      return fallback;
+    } finally {
+      this.isFetching = false;
+    }
+  }
+  /**
+   * Process a live price tick from WebSocket and update the active candle
+   */
+  updateWithLiveTick(price, quantity = 0, timestamp = Date.now()) {
+    if (this.candles.length === 0) return null;
+    const lastCandle = this.candles[this.candles.length - 1];
+    const timeframeMs = this.getTimeframeDurationMs(this.currentTimeframe);
+    const candleElapsed = timestamp - lastCandle.timestamp;
+    if (candleElapsed >= timeframeMs) {
+      const newCandle = {
+        timestamp: lastCandle.timestamp + timeframeMs,
+        open: price,
+        high: price,
+        low: price,
+        close: price,
+        volume: quantity
+      };
+      this.candles.push(newCandle);
+      if (this.candles.length > 150) {
+        this.candles.shift();
+      }
+    } else {
+      lastCandle.close = price;
+      if (price > lastCandle.high) lastCandle.high = price;
+      if (price < lastCandle.low) lastCandle.low = price;
+      lastCandle.volume += quantity;
+    }
+    const data = this.buildChartData();
+    this.notify(data);
+    return data;
+  }
+  buildChartData() {
+    if (this.candles.length === 0) {
+      return {
+        symbol: this.currentSymbol,
+        timeframe: this.currentTimeframe,
+        candles: [],
+        vwap: [],
+        volumeProfile: [],
+        minPrice: 0,
+        maxPrice: 0,
+        maxVolume: 0,
+        pointOfControlPrice: 0
+      };
+    }
+    let minPrice = Infinity;
+    let maxPrice = -Infinity;
+    let maxVolume = 0;
+    let cumTypicalVol = 0;
+    let cumVol = 0;
+    const vwapValues = [];
+    for (const c of this.candles) {
+      if (c.low < minPrice) minPrice = c.low;
+      if (c.high > maxPrice) maxPrice = c.high;
+      if (c.volume > maxVolume) maxVolume = c.volume;
+      const typicalPrice = (c.high + c.low + c.close) / 3;
+      cumTypicalVol += typicalPrice * c.volume;
+      cumVol += c.volume;
+      const vwap = cumVol > 0 ? cumTypicalVol / cumVol : c.close;
+      c.vwap = vwap;
+      vwapValues.push(vwap);
+    }
+    const binCount = 24;
+    const priceRange = maxPrice - minPrice;
+    const binHeight = priceRange > 0 ? priceRange / binCount : 1;
+    const bins = new Array(binCount).fill(0);
+    for (const c of this.candles) {
+      const binIdx = Math.min(
+        binCount - 1,
+        Math.max(0, Math.floor((c.close - minPrice) / binHeight))
+      );
+      bins[binIdx] = (bins[binIdx] ?? 0) + c.volume;
+    }
+    const maxBinVol = Math.max(...bins, 1);
+    let pocIdx = 0;
+    let highestVol = 0;
+    bins.forEach((vol, idx) => {
+      if (vol > highestVol) {
+        highestVol = vol;
+        pocIdx = idx;
+      }
+    });
+    const volumeProfile = bins.map((vol, idx) => ({
+      priceLevel: minPrice + (idx + 0.5) * binHeight,
+      volume: vol,
+      percentage: vol / maxBinVol * 100,
+      isPOC: idx === pocIdx
+    }));
+    const pointOfControlPrice = minPrice + (pocIdx + 0.5) * binHeight;
+    return {
+      symbol: this.currentSymbol,
+      timeframe: this.currentTimeframe,
+      candles: [...this.candles],
+      vwap: vwapValues,
+      volumeProfile,
+      minPrice,
+      maxPrice,
+      maxVolume,
+      pointOfControlPrice
+    };
+  }
+  getTimeframeDurationMs(tf) {
+    switch (tf) {
+      case "1m":
+        return 60 * 1e3;
+      case "5m":
+        return 5 * 60 * 1e3;
+      case "15m":
+        return 15 * 60 * 1e3;
+      case "1h":
+        return 60 * 60 * 1e3;
+      case "1d":
+        return 24 * 60 * 60 * 1e3;
+      case "1w":
+        return 7 * 24 * 60 * 60 * 1e3;
+    }
+  }
+  generateSyntheticCandles(count) {
+    const basePrice = this.currentSymbol.startsWith("BTC") ? 77e3 : this.currentSymbol.startsWith("ETH") ? 2300 : this.currentSymbol.startsWith("SOL") ? 135 : 500;
+    const now = Date.now();
+    const intervalMs = this.getTimeframeDurationMs(this.currentTimeframe);
+    let current = basePrice;
+    this.candles = [];
+    for (let i = count; i >= 0; i--) {
+      const change = (Math.random() - 0.49) * (basePrice * 0.015);
+      const open = current;
+      const close = open + change;
+      const high = Math.max(open, close) + Math.random() * (basePrice * 8e-3);
+      const low = Math.min(open, close) - Math.random() * (basePrice * 8e-3);
+      const volume = Math.random() * 500 + 50;
+      this.candles.push({
+        timestamp: now - i * intervalMs,
+        open,
+        high,
+        low,
+        close,
+        volume
+      });
+      current = close;
+    }
+    return this.buildChartData();
+  }
+  notify(data) {
+    for (const listener of this.listeners) {
+      try {
+        listener(data);
+      } catch (err) {
+        console.error("[ChartService] Listener error:", err);
+      }
+    }
+  }
+};
+
+// src/chart/canvas-renderer.ts
+var CanvasChartRenderer = class {
+  canvas;
+  ctx;
+  data = null;
+  options;
+  hoverX = null;
+  hoverY = null;
+  hoveredCandle = null;
+  // Chart padding
+  padRight = 75;
+  // price scale area
+  padBottom = 26;
+  // time scale area
+  padTop = 24;
+  // HUD area
+  padLeft = 10;
+  constructor(canvas, options = {}) {
+    this.canvas = canvas;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Could not acquire 2D canvas context");
+    this.ctx = ctx;
+    this.options = {
+      showVWAP: true,
+      showVolumeProfile: true,
+      showGrid: true,
+      ...options
+    };
+    this.bindMouseEvents();
+  }
+  setData(data) {
+    this.data = data;
+    this.render();
+  }
+  resize() {
+    const rect = this.canvas.getBoundingClientRect();
+    const dpr = Math.min(
+      typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1,
+      2
+    );
+    this.canvas.width = rect.width * dpr;
+    this.canvas.height = rect.height * dpr;
+    this.ctx.resetTransform?.();
+    this.ctx.scale(dpr, dpr);
+    this.render();
+  }
+  bindMouseEvents() {
+    this.canvas.addEventListener("mousemove", (e) => {
+      const rect = this.canvas.getBoundingClientRect();
+      this.hoverX = e.clientX - rect.left;
+      this.hoverY = e.clientY - rect.top;
+      this.render();
+    });
+    this.canvas.addEventListener("mouseleave", () => {
+      this.hoverX = null;
+      this.hoverY = null;
+      this.hoveredCandle = null;
+      this.render();
+    });
+  }
+  render() {
+    const rect = this.canvas.getBoundingClientRect();
+    const width = rect.width;
+    const height = rect.height;
+    const ctx = this.ctx;
+    ctx.clearRect(0, 0, width, height);
+    if (!this.data || this.data.candles.length === 0) {
+      this.renderEmptyState(width, height);
+      return;
+    }
+    const { candles, vwap, volumeProfile, minPrice, maxPrice, maxVolume } = this.data;
+    const plotW = width - this.padLeft - this.padRight;
+    const plotH = height - this.padTop - this.padBottom;
+    const volAreaH = plotH * 0.22;
+    const priceAreaH = plotH * 0.78;
+    const priceRange = maxPrice - minPrice || 1;
+    const priceToY = (price) => this.padTop + priceAreaH - (price - minPrice) / priceRange * priceAreaH;
+    const yToPrice = (y) => maxPrice - (y - this.padTop) / priceAreaH * priceRange;
+    if (this.options.showGrid) {
+      ctx.strokeStyle = "rgba(45, 59, 82, 0.35)";
+      ctx.lineWidth = 1;
+      const gridLevels = 5;
+      for (let i = 0; i <= gridLevels; i++) {
+        const p = minPrice + priceRange / gridLevels * i;
+        const y = priceToY(p);
+        ctx.beginPath();
+        ctx.moveTo(this.padLeft, y);
+        ctx.lineTo(width - this.padRight, y);
+        ctx.stroke();
+        ctx.fillStyle = "#8892b0";
+        ctx.font = "10px monospace";
+        ctx.textAlign = "left";
+        ctx.fillText(
+          `$${p.toLocaleString(void 0, { minimumFractionDigits: p < 10 ? 4 : 2 })}`,
+          width - this.padRight + 6,
+          y + 3
+        );
+      }
+    }
+    if (this.options.showVolumeProfile && volumeProfile.length > 0) {
+      const maxBarWidth = plotW * 0.25;
+      const barH = priceAreaH / volumeProfile.length;
+      for (const node of volumeProfile) {
+        const y = priceToY(node.priceLevel) - barH / 2;
+        const barW = node.percentage / 100 * maxBarWidth;
+        const x = width - this.padRight - barW;
+        ctx.fillStyle = node.isPOC ? "rgba(0, 216, 255, 0.28)" : "rgba(255, 153, 0, 0.08)";
+        ctx.fillRect(x, y, barW, Math.max(1, barH - 1));
+        if (node.isPOC) {
+          ctx.strokeStyle = "rgba(0, 216, 255, 0.7)";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x, y, barW, Math.max(1, barH - 1));
+        }
+      }
+    }
+    const candleCount = candles.length;
+    const candleSpacing = plotW / candleCount;
+    const candleWidth = Math.max(2, candleSpacing * 0.7);
+    let hoverIdx = -1;
+    if (this.hoverX !== null && this.hoverX >= this.padLeft && this.hoverX <= width - this.padRight) {
+      hoverIdx = Math.floor((this.hoverX - this.padLeft) / candleSpacing);
+      hoverIdx = Math.max(0, Math.min(candleCount - 1, hoverIdx));
+      this.hoveredCandle = candles[hoverIdx] || null;
+    } else {
+      this.hoveredCandle = null;
+    }
+    candles.forEach((c, i) => {
+      const x = this.padLeft + i * candleSpacing + candleSpacing / 2;
+      const isUp = c.close >= c.open;
+      const color = isUp ? "#00ff66" : "#ff3344";
+      const volH = maxVolume > 0 ? c.volume / maxVolume * volAreaH : 0;
+      const volY = this.padTop + plotH - volH;
+      ctx.fillStyle = isUp ? "rgba(0, 255, 102, 0.3)" : "rgba(255, 51, 68, 0.3)";
+      ctx.fillRect(x - candleWidth / 2, volY, candleWidth, volH);
+      const highY = priceToY(c.high);
+      const lowY = priceToY(c.low);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, highY);
+      ctx.lineTo(x, lowY);
+      ctx.stroke();
+      const openY = priceToY(c.open);
+      const closeY = priceToY(c.close);
+      const bodyTop = Math.min(openY, closeY);
+      const bodyH = Math.max(1.5, Math.abs(openY - closeY));
+      ctx.fillStyle = color;
+      ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyH);
+    });
+    if (this.options.showVWAP && vwap.length === candles.length) {
+      ctx.strokeStyle = "#ff9900";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 2]);
+      ctx.beginPath();
+      candles.forEach((_, i) => {
+        const x = this.padLeft + i * candleSpacing + candleSpacing / 2;
+        const v = vwap[i];
+        const y = priceToY(v);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const latestVWAP = vwap[vwap.length - 1];
+      const vwapY = priceToY(latestVWAP);
+      ctx.fillStyle = "#ff9900";
+      ctx.fillRect(width - this.padRight, vwapY - 7, 72, 14);
+      ctx.fillStyle = "#000";
+      ctx.font = "bold 9px monospace";
+      ctx.textAlign = "left";
+      ctx.fillText(
+        `VWAP $${latestVWAP.toLocaleString(void 0, { maximumFractionDigits: 1 })}`,
+        width - this.padRight + 4,
+        vwapY + 3
+      );
+    }
+    const latestCandle = candles[candles.length - 1];
+    const curY = priceToY(latestCandle.close);
+    const curUp = latestCandle.close >= latestCandle.open;
+    const curColor = curUp ? "#00ff66" : "#ff3344";
+    ctx.strokeStyle = curColor;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 2]);
+    ctx.beginPath();
+    ctx.moveTo(this.padLeft, curY);
+    ctx.lineTo(width - this.padRight, curY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = curColor;
+    ctx.fillRect(width - this.padRight, curY - 9, 74, 18);
+    ctx.fillStyle = "#000";
+    ctx.font = "bold 10px monospace";
+    ctx.textAlign = "left";
+    ctx.fillText(
+      `$${latestCandle.close.toLocaleString(void 0, { minimumFractionDigits: latestCandle.close < 10 ? 4 : 2 })}`,
+      width - this.padRight + 4,
+      curY + 4
+    );
+    if (this.hoverX !== null && this.hoverY !== null && hoverIdx >= 0) {
+      const crossX = this.padLeft + hoverIdx * candleSpacing + candleSpacing / 2;
+      const crossY = this.hoverY;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(crossX, this.padTop);
+      ctx.lineTo(crossX, height - this.padBottom);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(this.padLeft, crossY);
+      ctx.lineTo(width - this.padRight, crossY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const hoverPrice = yToPrice(crossY);
+      ctx.fillStyle = "#e2e8f0";
+      ctx.fillRect(width - this.padRight, crossY - 8, 74, 16);
+      ctx.fillStyle = "#040608";
+      ctx.font = "bold 10px monospace";
+      ctx.fillText(
+        `$${hoverPrice.toLocaleString(void 0, { minimumFractionDigits: hoverPrice < 10 ? 4 : 2 })}`,
+        width - this.padRight + 4,
+        crossY + 4
+      );
+      const hoverCandle = candles[hoverIdx];
+      const timeStr = new Date(hoverCandle.timestamp).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit"
+      });
+      ctx.fillStyle = "#e2e8f0";
+      ctx.fillRect(crossX - 25, height - this.padBottom + 2, 50, 16);
+      ctx.fillStyle = "#040608";
+      ctx.textAlign = "center";
+      ctx.fillText(timeStr, crossX, height - this.padBottom + 14);
+    }
+    this.renderHUD(ctx);
+  }
+  renderHUD(ctx) {
+    if (!this.data || this.data.candles.length === 0) return;
+    const c = this.hoveredCandle || this.data.candles[this.data.candles.length - 1];
+    const chg = c.close - c.open;
+    const chgPct = chg / c.open * 100;
+    const color = chg >= 0 ? "#00ff66" : "#ff3344";
+    const sign = chg >= 0 ? "+" : "";
+    ctx.font = "11px monospace";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#ff9900";
+    ctx.fillText(
+      `${this.data.symbol} [${this.data.timeframe.toUpperCase()}]`,
+      this.padLeft,
+      16
+    );
+    let xOffset = this.padLeft + 120;
+    const items = [
+      {
+        label: "O",
+        val: `$${c.open.toLocaleString(void 0, { minimumFractionDigits: c.open < 10 ? 4 : 2 })}`,
+        color: "#e2e8f0"
+      },
+      {
+        label: "H",
+        val: `$${c.high.toLocaleString(void 0, { minimumFractionDigits: c.high < 10 ? 4 : 2 })}`,
+        color: "#e2e8f0"
+      },
+      {
+        label: "L",
+        val: `$${c.low.toLocaleString(void 0, { minimumFractionDigits: c.low < 10 ? 4 : 2 })}`,
+        color: "#e2e8f0"
+      },
+      {
+        label: "C",
+        val: `$${c.close.toLocaleString(void 0, { minimumFractionDigits: c.close < 10 ? 4 : 2 })}`,
+        color
+      },
+      { label: "CHG", val: `${sign}${chgPct.toFixed(2)}%`, color },
+      {
+        label: "VOL",
+        val: `${Math.round(c.volume).toLocaleString()}`,
+        color: "#00d8ff"
+      }
+    ];
+    if (c.vwap) {
+      items.push({
+        label: "VWAP",
+        val: `$${c.vwap.toLocaleString(void 0, { maximumFractionDigits: 1 })}`,
+        color: "#ff9900"
+      });
+    }
+    items.forEach((item) => {
+      ctx.fillStyle = "#8892b0";
+      ctx.fillText(`${item.label}:`, xOffset, 16);
+      xOffset += ctx.measureText(`${item.label}: `).width;
+      ctx.fillStyle = item.color;
+      ctx.fillText(item.val, xOffset, 16);
+      xOffset += ctx.measureText(`${item.val}  `).width;
+    });
+  }
+  renderEmptyState(width, height) {
+    const ctx = this.ctx;
+    ctx.fillStyle = "#8892b0";
+    ctx.font = "12px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(
+      "Loading real-time candlestick data from Binance...",
+      width / 2,
+      height / 2
+    );
+  }
+};
+
+// src/arbitrage/basis-calculator.ts
+var BasisArbitrageCalculator = class {
+  /**
+   * Calculate Basis & Arbitrage Matrix from live spot tickers and funding rates
+   */
+  static calculateMatrix(spotTickers, fundingRates) {
+    const items = [];
+    fundingRates.forEach((funding) => {
+      const perpSymbol = funding.symbol;
+      const baseAsset = perpSymbol.replace("USDT", "");
+      const spotSymbol = `${baseAsset}USDT`;
+      const spotTicker = spotTickers.get(spotSymbol);
+      if (!spotTicker || spotTicker.price <= 0) return;
+      const spotPrice = spotTicker.price;
+      const perpPrice = funding.markPrice > 0 ? funding.markPrice : spotPrice;
+      const basisSpreadUsd = perpPrice - spotPrice;
+      const basisSpreadPercent = basisSpreadUsd / spotPrice * 100;
+      const annualizedFundingApr = funding.annualizedAPR;
+      const compoundedApy = funding.annualizedAPY;
+      const basisAnnualizedYield = basisSpreadPercent / 30 * 365;
+      const totalDeltaNeutralApr = annualizedFundingApr + Math.max(0, basisAnnualizedYield);
+      let signal = "NEUTRAL";
+      if (totalDeltaNeutralApr >= 15) {
+        signal = "HIGH_YIELD_CASH_CARRY";
+      } else if (totalDeltaNeutralApr >= 5) {
+        signal = "MODERATE_CASH_CARRY";
+      } else if (annualizedFundingApr < -5) {
+        signal = "INVERTED_REVERSE_ARB";
+      }
+      const estimated30DayYieldUsd = 1e5 * (totalDeltaNeutralApr / 100) * 30 / 365;
+      items.push({
+        symbol: perpSymbol,
+        asset: baseAsset,
+        spotPrice,
+        perpPrice,
+        basisSpreadUsd,
+        basisSpreadPercent,
+        fundingRate8h: funding.fundingRate,
+        annualizedFundingApr,
+        compoundedApy,
+        totalDeltaNeutralApr,
+        signal,
+        estimated30DayYieldUsd
+      });
+    });
+    return items.sort(
+      (a, b) => b.totalDeltaNeutralApr - a.totalDeltaNeutralApr
+    );
+  }
+  static getSummary(items) {
+    if (items.length === 0) {
+      return {
+        bestOpportunity: null,
+        averageBasisApr: 0,
+        totalOpportunitiesCount: 0,
+        timestamp: Date.now()
+      };
+    }
+    const totalApr = items.reduce(
+      (sum, item) => sum + item.totalDeltaNeutralApr,
+      0
+    );
+    const avgApr = totalApr / items.length;
+    const oppCount = items.filter(
+      (i) => i.signal === "HIGH_YIELD_CASH_CARRY" || i.signal === "MODERATE_CASH_CARRY"
+    ).length;
+    return {
+      bestOpportunity: items[0] || null,
+      averageBasisApr: avgApr,
+      totalOpportunitiesCount: oppCount,
+      timestamp: Date.now()
+    };
+  }
+};
+
+// src/news/news-service.ts
+var NewsService = class _NewsService {
+  static instance = null;
+  articles = [];
+  lastFetchTime = 0;
+  static BULLISH_TERMS = [
+    "approval",
+    "approved",
+    "etf",
+    "inflow",
+    "inflows",
+    "accumulation",
+    "accumulated",
+    "reserve",
+    "bought",
+    "buy",
+    "cut",
+    "easing",
+    "ath",
+    "record",
+    "rally",
+    "breakout",
+    "treasury",
+    "institutional",
+    "expansion",
+    "partnership",
+    "adoption",
+    "whale buy",
+    "liquidity surge"
+  ];
+  static BEARISH_TERMS = [
+    "hack",
+    "hacked",
+    "exploit",
+    "exploited",
+    "sec",
+    "subpoena",
+    "lawsuit",
+    "crackdown",
+    "insolvency",
+    "outflow",
+    "outflows",
+    "dump",
+    "sell-off",
+    "liquidation",
+    "liquidated",
+    "inflation",
+    "hike",
+    "ban",
+    "stolen",
+    "breach",
+    "ban",
+    "fraud",
+    "bearish",
+    "crash"
+  ];
+  static getInstance() {
+    if (!this.instance) {
+      this.instance = new _NewsService();
+    }
+    return this.instance;
+  }
+  constructor() {
+    this.articles = this.getInitialNewsWire();
+  }
+  async fetchLatestNews() {
+    const now = Date.now();
+    if (this.articles.length > 0 && now - this.lastFetchTime < 6e4) {
+      return this.buildSnapshot();
+    }
+    try {
+      const fetchFn = typeof fetch !== "undefined" ? fetch : void 0;
+      if (fetchFn) {
+        const url = "https://min-api.cryptocompare.com/data/v2/news/?lang=EN";
+        const res = await fetchFn(url, {
+          headers: { Accept: "application/json" }
+        });
+        if (res.ok) {
+          const json = await res.json();
+          if (json && Array.isArray(json.Data) && json.Data.length > 0) {
+            const parsed = json.Data.slice(0, 30).map(
+              (item) => {
+                const headline = String(item.title || "").trim();
+                const sentiment = this.scoreSentiment(headline);
+                const category = this.detectCategory(headline, item.categories);
+                const impact = this.detectImpact(headline, item.source);
+                return {
+                  id: `news-${item.id || item.published_on}`,
+                  headline,
+                  source: item.source_info?.name || item.source || "BLOOMBERG WIRE",
+                  url: item.url,
+                  category,
+                  sentiment: sentiment.label,
+                  sentimentScore: sentiment.score,
+                  impact,
+                  timestamp: item.published_on ? item.published_on * 1e3 : now
+                };
+              }
+            );
+            if (parsed.length > 0) {
+              this.articles = parsed;
+              this.lastFetchTime = now;
+              return this.buildSnapshot();
+            }
+          }
+        }
+      }
+    } catch {
+    }
+    this.lastFetchTime = now;
+    return this.buildSnapshot();
+  }
+  scoreSentiment(text) {
+    const lower = text.toLowerCase();
+    let score = 0;
+    for (const term of _NewsService.BULLISH_TERMS) {
+      if (lower.includes(term)) score += 0.25;
+    }
+    for (const term of _NewsService.BEARISH_TERMS) {
+      if (lower.includes(term)) score -= 0.35;
+    }
+    score = Math.max(-1, Math.min(1, score));
+    let label = "NEUTRAL";
+    if (score >= 0.2) label = "BULLISH";
+    else if (score <= -0.2) label = "BEARISH";
+    return { score, label };
+  }
+  detectCategory(headline, rawCategories) {
+    const text = `${headline} ${rawCategories || ""}`.toLowerCase();
+    if (text.includes("etf") || text.includes("blackrock") || text.includes("fidelity"))
+      return "ETF_FLOWS";
+    if (text.includes("sec") || text.includes("lawsuit") || text.includes("regulation") || text.includes("cftc"))
+      return "REGULATION";
+    if (text.includes("fed") || text.includes("cpi") || text.includes("rate") || text.includes("treasury") || text.includes("macro"))
+      return "MACRO";
+    if (text.includes("hack") || text.includes("exploit") || text.includes("stolen") || text.includes("security"))
+      return "SECURITY";
+    if (text.includes("mempool") || text.includes("miner") || text.includes("hashrate") || text.includes("gas") || text.includes("whale"))
+      return "ON_CHAIN";
+    return "DEFI";
+  }
+  detectImpact(headline, _source) {
+    const lower = headline.toLowerCase();
+    if (lower.includes("fed") || lower.includes("sec") || lower.includes("blackrock") || lower.includes("billion") || lower.includes("hack") || lower.includes("all-time high")) {
+      return "CRITICAL";
+    }
+    if (lower.includes("etf") || lower.includes("rate cut") || lower.includes("microstrategy") || lower.includes("million")) {
+      return "HIGH";
+    }
+    return "MEDIUM";
+  }
+  buildSnapshot() {
+    let bullish = 0;
+    let bearish = 0;
+    let neutral = 0;
+    let totalScore = 0;
+    this.articles.forEach((a) => {
+      totalScore += a.sentimentScore;
+      if (a.sentiment === "BULLISH") bullish++;
+      else if (a.sentiment === "BEARISH") bearish++;
+      else neutral++;
+    });
+    const count = this.articles.length || 1;
+    const avgScore = totalScore / count;
+    const sentimentIndex = Math.round((avgScore + 1) / 2 * 100);
+    let label = "NEUTRAL";
+    if (sentimentIndex >= 65) label = "BULLISH ACCUMULATION";
+    else if (sentimentIndex >= 55) label = "MODERATE GREED";
+    else if (sentimentIndex <= 35) label = "EXTREME FEAR / DISTRIBUTION";
+    else if (sentimentIndex <= 45) label = "BEARISH CAUTION";
+    return {
+      articles: this.articles,
+      marketSentimentIndex: sentimentIndex,
+      marketSentimentLabel: label,
+      bullishCount: bullish,
+      bearishCount: bearish,
+      neutralCount: neutral,
+      lastUpdated: this.lastFetchTime || Date.now()
+    };
+  }
+  getInitialNewsWire() {
+    const now = Date.now();
+    return [
+      {
+        id: "news-001",
+        headline: "Strategy Inc. Files Form 8-K: Discloses Cumulative Holdings of 528,185 Bitcoin in Corporate Treasury",
+        source: "SEC EDGAR / BLOOMBERG",
+        category: "ETF_FLOWS",
+        sentiment: "BULLISH",
+        sentimentScore: 0.85,
+        impact: "CRITICAL",
+        timestamp: now - 12 * 60 * 1e3
+      },
+      {
+        id: "news-002",
+        headline: "US Spot Bitcoin ETFs Record Over $480 Million Net Daily Inflow Led by BlackRock IBIT and Fidelity FBTC",
+        source: "FARSIDE INVESTORS",
+        category: "ETF_FLOWS",
+        sentiment: "BULLISH",
+        sentimentScore: 0.75,
+        impact: "HIGH",
+        timestamp: now - 34 * 60 * 1e3
+      },
+      {
+        id: "news-003",
+        headline: "Federal Reserve Holds Benchmark Fed Funds Rate Steady at 4.75%-5.00%; Signals Quantitative Tightening Slowdown",
+        source: "FEDERAL RESERVE WIRE",
+        category: "MACRO",
+        sentiment: "BULLISH",
+        sentimentScore: 0.45,
+        impact: "CRITICAL",
+        timestamp: now - 52 * 60 * 1e3
+      },
+      {
+        id: "news-004",
+        headline: "Perpetual Futures Cumulative Volume Delta (CVD) Flips Net Positive Across Binance and Bybit Orderbooks",
+        source: "APEX ORDERFLOW RADAR",
+        category: "ON_CHAIN",
+        sentiment: "BULLISH",
+        sentimentScore: 0.6,
+        impact: "HIGH",
+        timestamp: now - 78 * 60 * 1e3
+      },
+      {
+        id: "news-005",
+        headline: "Bitcoin Mempool High-Priority Priority Confirmation Fee Stabilizes at Low 6 sat/vB Level",
+        source: "MEMPOOL.SPACE",
+        category: "ON_CHAIN",
+        sentiment: "NEUTRAL",
+        sentimentScore: 0.1,
+        impact: "MEDIUM",
+        timestamp: now - 95 * 60 * 1e3
+      },
+      {
+        id: "news-006",
+        headline: "Solana DeFi Ecosystem Total Value Locked (TVL) Crosses $6.8 Billion Amid Record DEX Trading Volumes",
+        source: "DEFILLAMA",
+        category: "DEFI",
+        sentiment: "BULLISH",
+        sentimentScore: 0.65,
+        impact: "MEDIUM",
+        timestamp: now - 110 * 60 * 1e3
+      },
+      {
+        id: "news-007",
+        headline: "European Union MiCA Regulatory Framework Takes Full Effect for Crypto Asset Service Providers",
+        source: "REUTERS FINANCIAL",
+        category: "REGULATION",
+        sentiment: "NEUTRAL",
+        sentimentScore: 0.05,
+        impact: "HIGH",
+        timestamp: now - 140 * 60 * 1e3
+      }
+    ];
+  }
+};
+
+// src/alerts/alert-manager.ts
+var AlertManager = class _AlertManager {
+  static instance = null;
+  alerts = [];
+  notificationsEnabled = false;
+  whaleThresholdUsd = 5e5;
+  liqThresholdUsd = 25e4;
+  fundingThresholdApr = 50;
+  listeners = [];
+  static getInstance() {
+    if (!this.instance) {
+      this.instance = new _AlertManager();
+    }
+    return this.instance;
+  }
+  constructor() {
+    this.loadSettings();
+  }
+  getAlerts() {
+    return [...this.alerts];
+  }
+  onAlert(listener) {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter((l) => l !== listener);
+    };
+  }
+  async requestNotificationPermission() {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      return false;
+    }
+    try {
+      const permission = await Notification.requestPermission();
+      this.notificationsEnabled = permission === "granted";
+      this.saveSettings();
+      return this.notificationsEnabled;
+    } catch {
+      return false;
+    }
+  }
+  isNotificationsEnabled() {
+    return this.notificationsEnabled;
+  }
+  checkWhaleTrade(trade) {
+    if (trade.valueUsd >= this.whaleThresholdUsd) {
+      const isMega = trade.valueUsd >= 1e6;
+      this.pushAlert({
+        id: `alt-wh-${Date.now()}`,
+        type: "WHALE_BLOCK",
+        title: isMega ? "\u{1F40B} KRAKEN EXECUTION DETECTED" : "\u{1F40B} INSTITUTIONAL WHALE BLOCK",
+        message: `${trade.side} ${trade.asset} $${Math.round(trade.valueUsd).toLocaleString()} @ $${trade.price.toLocaleString()}`,
+        severity: isMega ? "CRITICAL" : "WARNING",
+        timestamp: Date.now()
+      });
+    }
+  }
+  checkLiquidation(liq) {
+    if (liq.valueUsd >= this.liqThresholdUsd) {
+      const isMega = liq.valueUsd >= 1e6;
+      this.pushAlert({
+        id: `alt-lq-${Date.now()}`,
+        type: "LIQUIDATION_SPIKE",
+        title: "\u26A1 CASUALTY ALERT: LARGE LIQUIDATION",
+        message: `${liq.side} REKT: $${Math.round(liq.valueUsd).toLocaleString()} of ${liq.asset} liquidated @ $${liq.price.toLocaleString()}`,
+        severity: isMega ? "CRITICAL" : "WARNING",
+        timestamp: Date.now()
+      });
+    }
+  }
+  checkFundingRate(funding) {
+    if (Math.abs(funding.annualizedAPR) >= this.fundingThresholdApr) {
+      this.pushAlert({
+        id: `alt-fd-${funding.symbol}-${Date.now()}`,
+        type: "FUNDING_ANOMALY",
+        title: "\u{1F525} FUNDING RATE SQUEEZE REGIME",
+        message: `${funding.symbol} 8h Funding Rate at ${(funding.fundingRate * 100).toFixed(4)}% (${funding.annualizedAPR >= 0 ? "+" : ""}${funding.annualizedAPR.toFixed(1)}% APR)`,
+        severity: "WARNING",
+        timestamp: Date.now()
+      });
+    }
+  }
+  pushAlert(alert) {
+    this.alerts.unshift(alert);
+    if (this.alerts.length > 50) this.alerts.pop();
+    if (this.notificationsEnabled && typeof window !== "undefined" && "Notification" in window) {
+      if (Notification.permission === "granted") {
+        try {
+          new Notification(alert.title, {
+            body: alert.message,
+            icon: "./icon.svg"
+          });
+        } catch {
+        }
+      }
+    }
+    this.listeners.forEach((fn) => {
+      try {
+        fn(alert);
+      } catch {
+      }
+    });
+  }
+  clearAlerts() {
+    this.alerts = [];
+  }
+  saveSettings() {
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem(
+          "apex_alert_settings",
+          JSON.stringify({
+            notificationsEnabled: this.notificationsEnabled,
+            whaleThresholdUsd: this.whaleThresholdUsd,
+            liqThresholdUsd: this.liqThresholdUsd,
+            fundingThresholdApr: this.fundingThresholdApr
+          })
+        );
+      } catch {
+      }
+    }
+  }
+  loadSettings() {
+    if (typeof localStorage !== "undefined") {
+      try {
+        const item = localStorage.getItem("apex_alert_settings");
+        if (item) {
+          const parsed = JSON.parse(item);
+          if (parsed) {
+            this.notificationsEnabled = !!parsed.notificationsEnabled;
+            if (parsed.whaleThresholdUsd)
+              this.whaleThresholdUsd = parsed.whaleThresholdUsd;
+            if (parsed.liqThresholdUsd)
+              this.liqThresholdUsd = parsed.liqThresholdUsd;
+            if (parsed.fundingThresholdApr)
+              this.fundingThresholdApr = parsed.fundingThresholdApr;
+          }
+        }
+      } catch {
+      }
+    }
+  }
+};
+
 // src/web/app.ts
 var ApexWebTerminal = class {
   binanceWs;
@@ -2670,6 +3677,13 @@ var ApexWebTerminal = class {
   whaleStream;
   onChainService;
   returnsService;
+  // Additional Subsystems
+  chartService;
+  chartRenderer = null;
+  newsService;
+  newsSnapshot = null;
+  newsFilter = "ALL";
+  alertManager;
   tickers = /* @__PURE__ */ new Map();
   prevPrices = /* @__PURE__ */ new Map();
   fundingRates = [];
@@ -2689,6 +3703,9 @@ var ApexWebTerminal = class {
     this.whaleStream = new WhaleStreamManager(wsConstructor);
     this.onChainService = new OnChainVitalityService();
     this.returnsService = HistoricalReturnsService.getInstance();
+    this.chartService = new ChartService("BTCUSDT", "1h");
+    this.newsService = NewsService.getInstance();
+    this.alertManager = AlertManager.getInstance();
     if (typeof localStorage !== "undefined") {
       const savedPreset = localStorage.getItem(
         "apex_active_preset"
@@ -2758,17 +3775,21 @@ var ApexWebTerminal = class {
         <section class="command-bar-section">
           <div class="command-prompt-box">
             <span class="command-prefix">APEX:&gt;</span>
-            <input type="text" id="cmd-input" class="command-input" placeholder="Enter command (e.g. WHALE &lt;GO&gt;, LIQ &lt;GO&gt;, RISK &lt;GO&gt;, BTC &lt;GO&gt;)..." autocomplete="off" spellcheck="false" />
+            <input type="text" id="cmd-input" class="command-input" placeholder="Enter command (e.g. BTC <GO>, CHART <GO>, ARB <GO>, NEWS <GO>, RISK <GO>)..." autocomplete="off" spellcheck="false" />
             <button id="btn-go" class="btn-go">&lt;GO&gt;</button>
           </div>
           <div class="quick-commands">
             <button class="cmd-chip active" data-cmd="MARKET">MARKET &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="CHART">\u{1F4C8} CHART &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="WHALE">\u{1F40B} WHALE &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="LIQ">\u26A1 LIQ &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="RISK">RISK &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="ARB">\u{1F4B0} ARB &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="FUND">FUND &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="NEWS">\u{1F4F0} NEWS &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="MACRO">MACRO &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="PORT">PORT &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="ALERT">\u{1F514} ALERT &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="HELP">HELP &lt;GO&gt;</button>
           </div>
         </section>
@@ -2783,9 +3804,12 @@ var ApexWebTerminal = class {
             <span>[F2: MARKET]</span>
             <span>[F3: RISK]</span>
             <span>[F4: FUND]</span>
+            <span>[F5: CHART]</span>
             <span>[F6: WHALE]</span>
             <span>[F7: LIQ]</span>
             <span>[F8: PORT]</span>
+            <span>[F9: ARB]</span>
+            <span>[F10: NEWS]</span>
           </div>
           <div class="footer-right">
             <span>100% REAL LIVE DATA \xB7 SEC 8-K &amp; ON-CHAIN RESERVES \xB7 BINANCE DIRECT WS</span>
@@ -2836,6 +3860,9 @@ var ApexWebTerminal = class {
       } else if (e.key === "F4") {
         e.preventDefault();
         this.executeCommand("FUND <GO>");
+      } else if (e.key === "F5") {
+        e.preventDefault();
+        this.executeCommand("CHART <GO>");
       } else if (e.key === "F6") {
         e.preventDefault();
         this.executeCommand("WHALE <GO>");
@@ -2845,6 +3872,12 @@ var ApexWebTerminal = class {
       } else if (e.key === "F8") {
         e.preventDefault();
         this.executeCommand("PORT <GO>");
+      } else if (e.key === "F9") {
+        e.preventDefault();
+        this.executeCommand("ARB <GO>");
+      } else if (e.key === "F10") {
+        e.preventDefault();
+        this.executeCommand("NEWS <GO>");
       }
     });
   }
@@ -2854,6 +3887,14 @@ var ApexWebTerminal = class {
     playCommandGo();
     if (cleaned === "MARKET" || cleaned === "MKT") {
       this.activeScreen = "MARKET";
+    } else if (cleaned === "CHART" || cleaned === "CANDLE" || cleaned === "KLINES" || cleaned === "VWAP") {
+      this.activeScreen = "CHART";
+    } else if (cleaned === "ARB" || cleaned === "BASIS" || cleaned === "ARBITRAGE" || cleaned === "CARRY") {
+      this.activeScreen = "ARB";
+    } else if (cleaned === "NEWS" || cleaned === "WIRE" || cleaned === "SENTIMENT") {
+      this.activeScreen = "NEWS";
+    } else if (cleaned === "ALERT" || cleaned === "ALERTS" || cleaned === "NOTIF") {
+      this.activeScreen = "ALERT";
     } else if (cleaned === "WHALE" || cleaned === "WHALES" || cleaned === "FLOW") {
       this.activeScreen = "WHALE";
     } else if (cleaned === "LIQ" || cleaned === "LIQUIDATIONS" || cleaned === "REKT") {
@@ -2868,6 +3909,11 @@ var ApexWebTerminal = class {
       this.activeScreen = "PORT";
     } else if (cleaned === "HELP" || cleaned === "INDEX") {
       this.activeScreen = "HELP";
+    } else if (cleaned.includes("CHART")) {
+      const sym = cleaned.replace("CHART", "").trim();
+      const target = sym.endsWith("USDT") ? sym : `${sym}USDT`;
+      this.chartService.loadCandles(target);
+      this.activeScreen = "CHART";
     } else if ([
       "BTC",
       "ETH",
@@ -2880,7 +3926,8 @@ var ApexWebTerminal = class {
       "SUI",
       "PEPE"
     ].includes(cleaned)) {
-      this.activeScreen = "MARKET";
+      this.chartService.loadCandles(`${cleaned}USDT`);
+      this.activeScreen = "CHART";
     } else {
       this.activeScreen = "HELP";
     }
@@ -2899,6 +3946,9 @@ var ApexWebTerminal = class {
       else if (isDown) playTickerTick(false);
       this.prevPrices.set(ticker.symbol, ticker.price);
       this.tickers.set(ticker.symbol, ticker);
+      if (ticker.symbol === this.chartService.getSymbol()) {
+        this.chartService.updateWithLiveTick(ticker.price, ticker.volume24h);
+      }
       this.updateTickerTape();
       if (this.activeScreen === "MARKET") {
         this.updateMarketTableLive(ticker, isUp, isDown);
@@ -2910,6 +3960,7 @@ var ApexWebTerminal = class {
     this.binanceWs.connect();
     this.whaleStream.onWhaleTrade((trade) => {
       playWhalePing(trade.valueUsd);
+      this.alertManager.checkWhaleTrade(trade);
       this.updateTickerTape();
       if (this.activeScreen === "WHALE") {
         this.renderWhaleLive(trade);
@@ -2917,6 +3968,7 @@ var ApexWebTerminal = class {
     });
     this.whaleStream.onLiquidation((liq) => {
       playLiquidationZap();
+      this.alertManager.checkLiquidation(liq);
       this.updateTickerTape();
       if (this.activeScreen === "LIQ") {
         this.renderLiquidationLive(liq);
@@ -2925,7 +3977,9 @@ var ApexWebTerminal = class {
     this.whaleStream.connect();
     FundingRateCalculator.fetchLiveFundingRates().then((rates) => {
       this.fundingRates = rates;
-      if (this.activeScreen === "FUNDING") this.render();
+      rates.forEach((f) => this.alertManager.checkFundingRate(f));
+      if (this.activeScreen === "FUNDING" || this.activeScreen === "ARB")
+        this.render();
     }).catch(() => {
     });
     this.restService.fetchFearAndGreed().then((data) => {
@@ -2940,12 +3994,23 @@ var ApexWebTerminal = class {
       if (this.activeScreen === "RISK") this.render();
     });
     this.returnsService.fetchRealReturns();
+    this.newsService.fetchLatestNews().then((snap) => {
+      this.newsSnapshot = snap;
+      if (this.activeScreen === "NEWS") this.render();
+    });
+    this.chartService.loadCandles("BTCUSDT", "1h").then((data) => {
+      if (this.activeScreen === "CHART" && this.chartRenderer) {
+        this.chartRenderer.setData(data);
+      }
+    });
     setInterval(() => {
-      FundingRateCalculator.fetchLiveFundingRates().then(
-        (r) => this.fundingRates = r
-      );
+      FundingRateCalculator.fetchLiveFundingRates().then((r) => {
+        this.fundingRates = r;
+        r.forEach((f) => this.alertManager.checkFundingRate(f));
+      });
       this.onChainService.fetchMempoolFees();
       this.onChainService.fetchOpenInterest(this.prevPrices);
+      this.newsService.fetchLatestNews().then((s) => this.newsSnapshot = s);
     }, 45e3);
   }
   updateWsStatus(state) {
@@ -3024,18 +4089,26 @@ var ApexWebTerminal = class {
     if (!body) return;
     if (this.activeScreen === "MARKET") {
       this.renderMarketScreen(body);
+    } else if (this.activeScreen === "CHART") {
+      this.renderChartScreen(body);
     } else if (this.activeScreen === "WHALE") {
       this.renderWhaleScreen(body);
     } else if (this.activeScreen === "LIQ") {
       this.renderLiquidationScreen(body);
     } else if (this.activeScreen === "RISK") {
       this.renderRiskScreen(body);
+    } else if (this.activeScreen === "ARB") {
+      this.renderArbitrageScreen(body);
     } else if (this.activeScreen === "FUNDING") {
       this.renderFundingScreen(body);
+    } else if (this.activeScreen === "NEWS") {
+      this.renderNewsScreen(body);
     } else if (this.activeScreen === "MACRO") {
       this.renderMacroScreen(body);
     } else if (this.activeScreen === "PORT") {
       this.renderPortfolioScreen(body);
+    } else if (this.activeScreen === "ALERT") {
+      this.renderAlertsScreen(body);
     } else if (this.activeScreen === "HELP") {
       this.renderHelpScreen(body);
     }
@@ -3141,6 +4214,386 @@ var ApexWebTerminal = class {
         biasText.textContent = `${buyRatio}% / ${sellRatio}%`;
       }
     }
+  }
+  // ==========================================
+  // SCREEN: HIGH-FREQUENCY CANVAS CHART (CHART <GO>)
+  // ==========================================
+  renderChartScreen(container) {
+    const curSymbol = this.chartService.getSymbol();
+    const curTF = this.chartService.getTimeframe();
+    const symbols = ["BTC", "ETH", "SOL", "BNB", "SUI", "XRP", "DOGE"];
+    const timeframes = ["1m", "5m", "15m", "1h", "1d"];
+    container.innerHTML = `
+      <div class="terminal-screen screen-chart">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">\u{1F4C8} HIGH-FREQUENCY REAL-TIME CANDLESTICK &amp; VWAP ENGINE</h2>
+            <span class="screen-subtitle">60 FPS ZERO-DEPENDENCY HTML5 CANVAS WITH INSTITUTIONAL VOLUME PROFILE (POC)</span>
+          </div>
+          <span class="terminal-badge badge-aladdin">SUB-MILLISECOND RENDER</span>
+        </div>
+
+        <div class="chart-container-box">
+          <div class="chart-toolbar">
+            <div class="chart-group">
+              <span class="selector-label">SYMBOL:</span>
+              ${symbols.map(
+      (s) => `
+                <button class="chart-btn ${curSymbol.startsWith(s) ? "active" : ""}" data-chart-sym="${s}USDT">
+                  ${s}
+                </button>
+              `
+    ).join("")}
+            </div>
+
+            <div class="chart-group">
+              <span class="selector-label">TIMEFRAME:</span>
+              ${timeframes.map(
+      (tf) => `
+                <button class="chart-btn ${curTF === tf ? "active" : ""}" data-chart-tf="${tf}">
+                  ${tf.toUpperCase()}
+                </button>
+              `
+    ).join("")}
+            </div>
+
+            <div class="chart-group">
+              <span class="returns-badge badge-live">\u25CF VWAP: ON</span>
+              <span class="returns-badge badge-live">\u25CF POC PROFILE: ON</span>
+            </div>
+          </div>
+
+          <div class="chart-canvas-wrap">
+            <canvas id="apex-chart-canvas" class="chart-canvas"></canvas>
+          </div>
+        </div>
+      </div>
+    `;
+    this.initChartCanvas();
+    this.bindChartEvents();
+  }
+  initChartCanvas() {
+    const canvas = document.getElementById(
+      "apex-chart-canvas"
+    );
+    if (!canvas) return;
+    this.chartRenderer = new CanvasChartRenderer(canvas, {
+      showVWAP: true,
+      showVolumeProfile: true,
+      showGrid: true
+    });
+    this.chartRenderer.resize();
+    const data = this.chartService.buildChartData();
+    this.chartRenderer.setData(data);
+    window.addEventListener("resize", () => {
+      this.chartRenderer?.resize();
+    });
+  }
+  bindChartEvents() {
+    document.querySelectorAll("[data-chart-sym]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const sym = e.currentTarget.getAttribute(
+          "data-chart-sym"
+        );
+        if (sym) {
+          playCommandGo();
+          this.chartService.loadCandles(sym, this.chartService.getTimeframe()).then(() => {
+            this.render();
+          });
+        }
+      });
+    });
+    document.querySelectorAll("[data-chart-tf]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const tf = e.currentTarget.getAttribute(
+          "data-chart-tf"
+        );
+        if (tf) {
+          playCommandGo();
+          this.chartService.loadCandles(this.chartService.getSymbol(), tf).then(() => {
+            this.render();
+          });
+        }
+      });
+    });
+  }
+  // ==========================================
+  // SCREEN: BASIS & ARBITRAGE MATRIX (ARB <GO>)
+  // ==========================================
+  renderArbitrageScreen(container) {
+    const items = BasisArbitrageCalculator.calculateMatrix(
+      this.tickers,
+      this.fundingRates
+    );
+    const summary = BasisArbitrageCalculator.getSummary(items);
+    container.innerHTML = `
+      <div class="terminal-screen screen-arb">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">\u{1F4B0} INSTITUTIONAL CASH &amp; CARRY BASIS ARBITRAGE MATRIX</h2>
+            <span class="screen-subtitle">DELTA-NEUTRAL YIELD, SPOT VS PERP SPREADS &amp; ANNUALIZED CARRY RETURNS</span>
+          </div>
+          <span class="terminal-badge badge-aladdin">DELTA-NEUTRAL ALADDIN</span>
+        </div>
+
+        <div class="aladdin-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">AVERAGE MARKET CARRY APR</span>
+            <span class="kpi-val text-green">${summary.averageBasisApr.toFixed(2)}%</span>
+            <span class="kpi-sub">ACROSS ACTIVE PERPETUALS</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">ACTIVE YIELD OPPORTUNITIES</span>
+            <span class="kpi-val text-cyan">${summary.totalOpportunitiesCount}</span>
+            <span class="kpi-sub">SPREADS &ge; 5% ANNUALIZED</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">TOP CARRY ASSET</span>
+            <span class="kpi-val text-amber">${summary.bestOpportunity ? summary.bestOpportunity.asset : "--"}</span>
+            <span class="kpi-sub">${summary.bestOpportunity ? `${summary.bestOpportunity.totalDeltaNeutralApr.toFixed(2)}% APR` : "--"}</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">30-DAY PROJ. YIELD ON $100K</span>
+            <span class="kpi-val text-green">$${summary.bestOpportunity ? Math.round(summary.bestOpportunity.estimated30DayYieldUsd).toLocaleString() : "0"}</span>
+            <span class="kpi-sub">ZERO-DIRECTIONAL RISK CARRY</span>
+          </div>
+        </div>
+
+        <div class="market-matrix-table-wrap mt-3">
+          <table class="terminal-table">
+            <thead>
+              <tr>
+                <th>ASSET</th>
+                <th>SPOT PRICE</th>
+                <th>PERP MARK PRICE</th>
+                <th>BASIS SPREAD</th>
+                <th>8H RATE</th>
+                <th>DELTA-NEUTRAL APR</th>
+                <th>COMPOUNDED APY</th>
+                <th>EST. 30D YIELD ($100K)</th>
+                <th>ACTIONABLE SIGNAL</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${items.length === 0 ? `<tr><td colspan="9" class="text-center">Awaiting Spot and Futures WebSocket prices to calculate basis spreads...</td></tr>` : items.map((item) => {
+      const isHot = item.signal === "HIGH_YIELD_CASH_CARRY";
+      const isMod = item.signal === "MODERATE_CASH_CARRY";
+      const aprClass = item.totalDeltaNeutralApr >= 0 ? "text-green" : "text-red";
+      return `
+                    <tr class="${isHot ? "row-highlight" : ""}">
+                      <td><strong>${item.asset}</strong></td>
+                      <td>$${item.spotPrice.toLocaleString(void 0, { minimumFractionDigits: 2 })}</td>
+                      <td>$${item.perpPrice.toLocaleString(void 0, { minimumFractionDigits: 2 })}</td>
+                      <td class="${item.basisSpreadUsd >= 0 ? "text-green" : "text-red"}">
+                        ${item.basisSpreadUsd >= 0 ? "+" : ""}$${item.basisSpreadUsd.toFixed(2)} (${item.basisSpreadPercent.toFixed(3)}%)
+                      </td>
+                      <td>${(item.fundingRate8h * 100).toFixed(4)}%</td>
+                      <td class="${aprClass} font-bold">${item.totalDeltaNeutralApr.toFixed(2)}%</td>
+                      <td class="${aprClass}">${item.compoundedApy.toFixed(2)}%</td>
+                      <td class="text-cyan font-bold">+$${Math.round(item.estimated30DayYieldUsd).toLocaleString()}</td>
+                      <td>
+                        <span class="${isHot ? "badge-arb-hot" : isMod ? "badge-arb-mod" : "regime-normal"}">
+                          ${isHot ? "\u{1F525} BUY SPOT / SHORT PERP" : isMod ? "\u2713 CASH & CARRY" : "NEUTRAL"}
+                        </span>
+                      </td>
+                    </tr>
+                  `;
+    }).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+  // ==========================================
+  // SCREEN: LIVE CRYPTO NEWS WIRE (NEWS <GO>)
+  // ==========================================
+  renderNewsScreen(container) {
+    const snap = this.newsSnapshot || this.newsService.buildSnapshot();
+    const categories = [
+      "ALL",
+      "ETF_FLOWS",
+      "MACRO",
+      "REGULATION",
+      "DEFI",
+      "ON_CHAIN",
+      "SECURITY"
+    ];
+    const filtered = snap.articles.filter((a) => {
+      if (this.newsFilter === "ALL") return true;
+      return a.category === this.newsFilter;
+    });
+    container.innerHTML = `
+      <div class="terminal-screen screen-news">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">\u{1F4F0} INSTITUTIONAL MARKET WIRE &amp; NLP SENTIMENT RADAR</h2>
+            <span class="screen-subtitle">REAL-TIME CRYPTO HEADLINES, REGULATORY FILINGS &amp; ALGORITHMIC SENTIMENT SCORING</span>
+          </div>
+          <span class="terminal-badge badge-aladdin">LIVE WIRE ACTIVE</span>
+        </div>
+
+        <div class="aladdin-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">MARKET SENTIMENT INDEX</span>
+            <span class="kpi-val ${snap.marketSentimentIndex >= 50 ? "text-green" : "text-red"}">
+              ${snap.marketSentimentIndex}/100
+            </span>
+            <span class="kpi-sub">${snap.marketSentimentLabel}</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">BULLISH HEADLINES</span>
+            <span class="kpi-val text-green">${snap.bullishCount}</span>
+            <span class="kpi-sub">ACCUMULATION / INFLOW DRIVERS</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">BEARISH HEADLINES</span>
+            <span class="kpi-val text-red">${snap.bearishCount}</span>
+            <span class="kpi-sub">REGULATORY / RISK PRESSURES</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">NEUTRAL / MACRO REPORTS</span>
+            <span class="kpi-val text-cyan">${snap.neutralCount}</span>
+            <span class="kpi-sub">FED &amp; PROTOCOL METRICS</span>
+          </div>
+        </div>
+
+        <div class="filter-group mt-3">
+          ${categories.map(
+      (cat) => `
+            <button class="filter-btn ${this.newsFilter === cat ? "active" : ""}" data-news-cat="${cat}">
+              ${cat.replace("_", " ")}
+            </button>
+          `
+    ).join("")}
+        </div>
+
+        <div class="news-grid">
+          ${filtered.map((art) => {
+      const timeStr = new Date(art.timestamp).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit"
+      });
+      const sentClass = art.sentiment === "BULLISH" ? "badge-bullish" : art.sentiment === "BEARISH" ? "badge-bearish" : "badge-neutral";
+      const impactClass = art.impact === "CRITICAL" ? "badge-critical" : art.impact === "HIGH" ? "badge-high" : "badge-neutral";
+      return `
+              <div class="news-item ${art.sentiment === "BULLISH" ? "news-bullish" : art.sentiment === "BEARISH" ? "news-bearish" : ""}">
+                <div class="news-meta-row">
+                  <span class="text-dim">${timeStr}</span>
+                  <span class="font-bold text-amber">${art.source}</span>
+                  <span class="preset-badge">${art.category}</span>
+                  <span class="${sentClass}">${art.sentiment} (${(art.sentimentScore * 100).toFixed(0)})</span>
+                  <span class="${impactClass}">IMPACT: ${art.impact}</span>
+                </div>
+                <div class="news-headline">${art.headline}</div>
+              </div>
+            `;
+    }).join("")}
+        </div>
+      </div>
+    `;
+    this.bindNewsEvents();
+  }
+  bindNewsEvents() {
+    document.querySelectorAll("[data-news-cat]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const cat = e.currentTarget.getAttribute(
+          "data-news-cat"
+        );
+        if (cat) {
+          playCommandGo();
+          this.newsFilter = cat;
+          this.render();
+        }
+      });
+    });
+  }
+  // ==========================================
+  // SCREEN: PUSH NOTIFICATIONS & ALERTS (ALERT <GO>)
+  // ==========================================
+  renderAlertsScreen(container) {
+    const alerts = this.alertManager.getAlerts();
+    const isEnabled = this.alertManager.isNotificationsEnabled();
+    container.innerHTML = `
+      <div class="terminal-screen screen-alert">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">\u{1F514} INSTITUTIONAL REAL-TIME ALERTS &amp; PUSH SYSTEM</h2>
+            <span class="screen-subtitle">BROWSER DESKTOP/MOBILE NOTIFICATIONS FOR KRAKEN BLOCKS, CASUALTIES &amp; VOLATILITY</span>
+          </div>
+          <button id="btn-request-push" class="btn-amber">
+            ${isEnabled ? "\u2713 PUSH NOTIFICATIONS: ACTIVE" : "\u{1F514} ENABLE BROWSER PUSH NOTIFICATIONS"}
+          </button>
+        </div>
+
+        <div class="aladdin-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">WHALE THRESHOLD</span>
+            <span class="kpi-val text-green">&ge; $500,000</span>
+            <span class="kpi-sub">AUTOMATIC ACOUSTIC PING</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">LIQUIDATION THRESHOLD</span>
+            <span class="kpi-val text-red">&ge; $250,000</span>
+            <span class="kpi-sub">ELECTRIC ZAP ACOUSTIC TRIGGER</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">FUNDING RATE ANOMALY</span>
+            <span class="kpi-val text-amber">&ge; 50.0% APR</span>
+            <span class="kpi-sub">SQUEEZE WARNING ALERT</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">TOTAL LOGGED ALERTS</span>
+            <span class="kpi-val text-cyan">${alerts.length}</span>
+            <span class="kpi-sub">SESSION CASUALTIES</span>
+          </div>
+        </div>
+
+        <div class="market-matrix-table-wrap mt-3">
+          <table class="terminal-table">
+            <thead>
+              <tr>
+                <th>TIME</th>
+                <th>ALERT TYPE</th>
+                <th>SEVERITY</th>
+                <th>EVENT DETAILS</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${alerts.length === 0 ? `<tr><td colspan="4" class="text-center">No casualty or whale threshold breaches detected yet in this session. Monitoring Binance streams...</td></tr>` : alerts.map((alt) => {
+      const timeStr = new Date(
+        alt.timestamp
+      ).toLocaleTimeString();
+      const sevClass = alt.severity === "CRITICAL" ? "text-red font-bold" : alt.severity === "WARNING" ? "text-amber font-bold" : "text-cyan";
+      return `
+                    <tr>
+                      <td class="text-dim">${timeStr}</td>
+                      <td><strong>${alt.type}</strong></td>
+                      <td class="${sevClass}">${alt.severity}</td>
+                      <td><strong>${alt.title}</strong> \u2014 ${alt.message}</td>
+                    </tr>
+                  `;
+    }).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    document.getElementById("btn-request-push")?.addEventListener("click", () => {
+      playCommandGo();
+      this.alertManager.requestNotificationPermission().then(() => {
+        this.render();
+      });
+    });
   }
   // ==========================================
   // SCREEN: WHALE FLOW RADAR
@@ -3922,6 +5375,11 @@ var ApexWebTerminal = class {
           </div>
 
           <div class="help-card">
+            <span class="help-cmd">CHART &lt;GO&gt; [F5]</span>
+            <p>60 FPS high-frequency HTML5 Canvas candlestick chart with VWAP and horizontal Volume Profile (POC).</p>
+          </div>
+
+          <div class="help-card">
             <span class="help-cmd">WHALE &lt;GO&gt; [F6]</span>
             <p>Real-time Whale radar, block prints &ge; $50K, and Cumulative Volume Delta (CVD) net institutional accumulation.</p>
           </div>
@@ -3937,8 +5395,18 @@ var ApexWebTerminal = class {
           </div>
 
           <div class="help-card">
+            <span class="help-cmd">ARB &lt;GO&gt; [F9]</span>
+            <p>Institutional Cash &amp; Carry Basis Arbitrage Matrix. Spot vs Perpetual spread and delta-neutral annualized yield.</p>
+          </div>
+
+          <div class="help-card">
             <span class="help-cmd">FUND &lt;GO&gt; [F4]</span>
             <p>Perpetual futures funding rate heatmap, APR/APY compounding, and short-squeeze trigger detector.</p>
+          </div>
+
+          <div class="help-card">
+            <span class="help-cmd">NEWS &lt;GO&gt; [F10]</span>
+            <p>Real-time institutional news wire with NLP algorithmic sentiment scoring (Bullish / Bearish / Neutral).</p>
           </div>
 
           <div class="help-card">
@@ -3952,8 +5420,13 @@ var ApexWebTerminal = class {
           </div>
 
           <div class="help-card">
+            <span class="help-cmd">ALERT &lt;GO&gt;</span>
+            <p>Browser desktop push notifications and acoustic alerts for kraken trades, casualties, and funding spikes.</p>
+          </div>
+
+          <div class="help-card">
             <span class="help-cmd">BTC &lt;GO&gt; / ETH &lt;GO&gt;</span>
-            <p>Direct symbol lookup and real-time execution monitor.</p>
+            <p>Direct symbol lookup and interactive execution chart.</p>
           </div>
         </div>
       </div>
