@@ -57,6 +57,8 @@ import { BasisArbitrageCalculator } from "../arbitrage/basis-calculator.js";
 import { NewsService } from "../news/news-service.js";
 import { NewsWireSnapshot } from "../news/types.js";
 import { AlertManager } from "../alerts/alert-manager.js";
+import { OrderbookService } from "../orderbook/orderbook-service.js";
+import { AlphaPerformanceTracker } from "../feeds/alpha-tracker.js";
 
 class ApexWebTerminal {
   private binanceWs: BinanceWsFeedManager;
@@ -68,6 +70,8 @@ class ApexWebTerminal {
   // Additional Subsystems
   private chartService: ChartService;
   private chartRenderer: CanvasChartRenderer | null = null;
+  private orderbookService: OrderbookService;
+  private alphaTracker: AlphaPerformanceTracker;
   private newsService: NewsService;
   private newsSnapshot: NewsWireSnapshot | null = null;
   private newsFilter: string = "ALL";
@@ -85,6 +89,7 @@ class ApexWebTerminal {
   private activeScreen:
     | "MARKET"
     | "CHART"
+    | "BOOK"
     | "RISK"
     | "ARB"
     | "FUNDING"
@@ -110,6 +115,11 @@ class ApexWebTerminal {
     this.returnsService = HistoricalReturnsService.getInstance();
 
     this.chartService = new ChartService("BTCUSDT", "1h");
+    this.orderbookService = new OrderbookService(
+      "BTCUSDT",
+      wsConstructor as any,
+    );
+    this.alphaTracker = new AlphaPerformanceTracker();
     this.newsService = NewsService.getInstance();
     this.alertManager = AlertManager.getInstance();
 
@@ -194,6 +204,7 @@ class ApexWebTerminal {
           <div class="quick-commands">
             <button class="cmd-chip active" data-cmd="MARKET">MARKET &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="CHART">📈 CHART &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="BOOK">🧱 BOOK &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="WHALE">🐋 WHALE &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="LIQ">⚡ LIQ &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="RISK">RISK &lt;GO&gt;</button>
@@ -316,6 +327,14 @@ class ApexWebTerminal {
       cleaned === "VWAP"
     ) {
       this.activeScreen = "CHART";
+    } else if (
+      cleaned === "BOOK" ||
+      cleaned === "DEPTH" ||
+      cleaned === "L2" ||
+      cleaned === "ORDERBOOK" ||
+      cleaned === "WALLS"
+    ) {
+      this.activeScreen = "BOOK";
     } else if (
       cleaned === "ARB" ||
       cleaned === "BASIS" ||
@@ -498,8 +517,21 @@ class ApexWebTerminal {
     this.chartService.loadCandles("BTCUSDT", "1h").then((data) => {
       if (this.activeScreen === "CHART" && this.chartRenderer) {
         this.chartRenderer.setData(data);
+        this.chartRenderer.setWhaleOverlay(
+          this.whaleStream.getTrancheCampaigns(),
+          this.whaleStream.getWhaleTrades(),
+        );
       }
     });
+
+    // 9. L2 Orderbook Depth & Liquidity Wall Stream
+    this.orderbookService.onSnapshot(() => {
+      if (this.activeScreen === "BOOK") {
+        const body = document.getElementById("terminal-body");
+        if (body) this.renderOrderbookScreen(body);
+      }
+    });
+    this.orderbookService.start();
 
     setInterval(() => {
       FundingRateCalculator.fetchLiveFundingRates().then((r) => {
@@ -604,6 +636,8 @@ class ApexWebTerminal {
       this.renderMarketScreen(body);
     } else if (this.activeScreen === "CHART") {
       this.renderChartScreen(body);
+    } else if (this.activeScreen === "BOOK") {
+      this.renderOrderbookScreen(body);
     } else if (this.activeScreen === "WHALE") {
       this.renderWhaleScreen(body);
     } else if (this.activeScreen === "LIQ") {
@@ -804,6 +838,7 @@ class ApexWebTerminal {
             <div class="chart-group">
               <span class="returns-badge badge-live">● VWAP: ON</span>
               <span class="returns-badge badge-live">● POC PROFILE: ON</span>
+              <span class="returns-badge badge-live">● 🐋 WHALE CAMPAIGN VWAP &amp; FOOTPRINTS: ON</span>
             </div>
           </div>
 
@@ -828,11 +863,16 @@ class ApexWebTerminal {
       showVWAP: true,
       showVolumeProfile: true,
       showGrid: true,
+      showWhaleOverlay: true,
     });
 
     this.chartRenderer.resize();
     const data = this.chartService.buildChartData();
     this.chartRenderer.setData(data);
+    this.chartRenderer.setWhaleOverlay(
+      this.whaleStream.getTrancheCampaigns(),
+      this.whaleStream.getWhaleTrades(),
+    );
 
     window.addEventListener("resize", () => {
       this.chartRenderer?.resize();
@@ -868,6 +908,186 @@ class ApexWebTerminal {
             .then(() => {
               this.render();
             });
+        }
+      });
+    });
+  }
+
+  // ==========================================
+  // SCREEN: L2 ORDERBOOK DEPTH & LIQUIDITY WALLS (BOOK <GO>)
+  // ==========================================
+  private renderOrderbookScreen(container: HTMLElement): void {
+    const snap = this.orderbookService.getSnapshot();
+    const curSymbol = this.orderbookService.getSymbol();
+    const symbols = ["BTC", "ETH", "SOL", "BNB", "SUI", "XRP", "DOGE"];
+
+    if (!snap) {
+      container.innerHTML = `
+        <div class="terminal-screen screen-book">
+          <div class="screen-header">
+            <h2 class="screen-title">🧱 L2 ORDERBOOK MICROSTRUCTURE, STOIKOV MICRO-PRICE &amp; LIQUIDITY WALLS</h2>
+          </div>
+          <div class="p-4 text-center">Connecting to Binance Spot L2 Depth (@depth20@100ms)...</div>
+        </div>
+      `;
+      return;
+    }
+
+    const skewSign = snap.microPriceSkewBps >= 0 ? "+" : "";
+    const skewClass = snap.microPriceSkewBps >= 0 ? "text-green" : "text-red";
+    const obiSign = snap.obi20Percent >= 0 ? "+" : "";
+    const obiClass = snap.obi20Percent >= 0 ? "text-green" : "text-red";
+
+    container.innerHTML = `
+      <div class="terminal-screen screen-book">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">🧱 L2 ORDERBOOK DEPTH, STOIKOV MICRO-PRICE &amp; INSTITUTIONAL LIQUIDITY WALLS</h2>
+            <span class="screen-subtitle">BINANCE @DEPTH20@100MS · STOIKOV (2018) FAIR MICRO-PRICE · LIMIT WALL DETECTOR (&ge;2.2X MEAN DEPTH)</span>
+          </div>
+          <div class="filter-group">
+            ${symbols
+              .map(
+                (s) => `
+              <button class="filter-btn ${curSymbol.startsWith(s) ? "active" : ""}" data-book-sym="${s}USDT">
+                ${s}
+              </button>
+            `,
+              )
+              .join("")}
+          </div>
+        </div>
+
+        <div class="aladdin-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">STOIKOV MICRO-PRICE &amp; ALPHA SKEW</span>
+            <span class="kpi-val ${skewClass}">
+              $${snap.microPrice.toLocaleString(undefined, { minimumFractionDigits: snap.microPrice < 10 ? 4 : 2, maximumFractionDigits: snap.microPrice < 10 ? 4 : 2 })}
+            </span>
+            <span class="kpi-sub">SKEW VS MID: <strong>${skewSign}${snap.microPriceSkewBps.toFixed(2)} bps</strong> · SPREAD ${snap.spreadBps.toFixed(2)} bps</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">20-LEVEL ORDERBOOK IMBALANCE (OBI-20)</span>
+            <span class="kpi-val ${obiClass}">${obiSign}${snap.obi20Percent.toFixed(1)}%</span>
+            <span class="kpi-sub">${snap.regime} · BID $${Math.round(snap.totalBidDepthUsd).toLocaleString()} / ASK $${Math.round(snap.totalAskDepthUsd).toLocaleString()}</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">BIGGEST BID WALL (SUPPORT ПЛИТА)</span>
+            <span class="kpi-val text-green">
+              ${snap.biggestBidWall ? `$${snap.biggestBidWall.price.toLocaleString(undefined, { minimumFractionDigits: snap.midPrice < 10 ? 4 : 2 })}` : "--"}
+            </span>
+            <span class="kpi-sub">
+              ${snap.biggestBidWall ? `$${Math.round(snap.biggestBidWall.notionalUsd).toLocaleString()} (${snap.biggestBidWall.wallMultiple.toFixed(1)}x avg level)` : "--"}
+            </span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">BIGGEST ASK WALL (RESISTANCE ПЛИТА)</span>
+            <span class="kpi-val text-red">
+              ${snap.biggestAskWall ? `$${snap.biggestAskWall.price.toLocaleString(undefined, { minimumFractionDigits: snap.midPrice < 10 ? 4 : 2 })}` : "--"}
+            </span>
+            <span class="kpi-sub">
+              ${snap.biggestAskWall ? `$${Math.round(snap.biggestAskWall.notionalUsd).toLocaleString()} (${snap.biggestAskWall.wallMultiple.toFixed(1)}x avg level)` : "--"}
+            </span>
+          </div>
+        </div>
+
+        <div class="real-source-banner mt-2">
+          <span class="live-pulse"></span>
+          <span><strong>$500K SWEEP SLIPPAGE ESTIMATOR:</strong> Market BUY Impact: <strong>+${snap.slippageBuy1M_Bps.toFixed(2)} bps</strong> · Market SELL Impact: <strong>-${snap.slippageSell1M_Bps.toFixed(2)} bps</strong></span>
+          <span class="returns-badge badge-live">● 100MS L2 DEPTH STREAM ACTIVE</span>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;" class="mt-3">
+          <!-- BIDS LADDER -->
+          <div class="market-matrix-table-wrap">
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>BID PRICE (${snap.asset})</th>
+                  <th>SIZE (${snap.asset})</th>
+                  <th>NOTIONAL ($)</th>
+                  <th>CUMULATIVE ($)</th>
+                  <th>WALL DETECTOR</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${snap.bids
+                  .slice(0, 15)
+                  .map(
+                    (b) => `
+                  <tr class="${b.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, rgba(0, 255, 102, 0.12) ${b.depthPercent.toFixed(0)}%, transparent ${b.depthPercent.toFixed(0)}%);">
+                    <td class="text-green font-bold">$${b.price.toLocaleString(undefined, { minimumFractionDigits: b.price < 10 ? 4 : 2 })}</td>
+                    <td>${b.quantity.toLocaleString(undefined, { maximumFractionDigits: 3 })}</td>
+                    <td>$${Math.round(b.notionalUsd).toLocaleString()}</td>
+                    <td class="text-dim">$${Math.round(b.cumulativeUsd).toLocaleString()}</td>
+                    <td>
+                      ${
+                        b.isWall
+                          ? `<span class="regime-badge regime-squeeze">🧱 BID WALL (${b.wallMultiple.toFixed(1)}x)</span>`
+                          : `<span class="text-dim">${b.wallMultiple.toFixed(1)}x</span>`
+                      }
+                    </td>
+                  </tr>
+                `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+
+          <!-- ASKS LADDER -->
+          <div class="market-matrix-table-wrap">
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>ASK PRICE (${snap.asset})</th>
+                  <th>SIZE (${snap.asset})</th>
+                  <th>NOTIONAL ($)</th>
+                  <th>CUMULATIVE ($)</th>
+                  <th>WALL DETECTOR</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${snap.asks
+                  .slice(0, 15)
+                  .map(
+                    (a) => `
+                  <tr class="${a.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, rgba(255, 51, 68, 0.12) ${a.depthPercent.toFixed(0)}%, transparent ${a.depthPercent.toFixed(0)}%);">
+                    <td class="text-red font-bold">$${a.price.toLocaleString(undefined, { minimumFractionDigits: a.price < 10 ? 4 : 2 })}</td>
+                    <td>${a.quantity.toLocaleString(undefined, { maximumFractionDigits: 3 })}</td>
+                    <td>$${Math.round(a.notionalUsd).toLocaleString()}</td>
+                    <td class="text-dim">$${Math.round(a.cumulativeUsd).toLocaleString()}</td>
+                    <td>
+                      ${
+                        a.isWall
+                          ? `<span class="regime-badge regime-extreme">🧱 ASK WALL (${a.wallMultiple.toFixed(1)}x)</span>`
+                          : `<span class="text-dim">${a.wallMultiple.toFixed(1)}x</span>`
+                      }
+                    </td>
+                  </tr>
+                `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.querySelectorAll("[data-book-sym]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const sym = (e.currentTarget as HTMLElement).getAttribute(
+          "data-book-sym",
+        );
+        if (sym) {
+          playCommandGo();
+          this.orderbookService.switchSymbol(sym).then(() => {
+            this.render();
+          });
         }
       });
     });
@@ -1114,13 +1334,14 @@ class ApexWebTerminal {
   private renderAlertsScreen(container: HTMLElement): void {
     const alerts = this.alertManager.getAlerts();
     const isEnabled = this.alertManager.isNotificationsEnabled();
+    const tgConfig = this.alertManager.getTelegramConfig();
 
     container.innerHTML = `
       <div class="terminal-screen screen-alert">
         <div class="screen-header">
           <div class="screen-title-group">
-            <h2 class="screen-title">🔔 INSTITUTIONAL REAL-TIME ALERTS &amp; PUSH SYSTEM</h2>
-            <span class="screen-subtitle">BROWSER DESKTOP/MOBILE NOTIFICATIONS FOR KRAKEN BLOCKS, CASUALTIES &amp; VOLATILITY</span>
+            <h2 class="screen-title">🔔 INSTITUTIONAL REAL-TIME ALERTS, PUSH &amp; TELEGRAM QUANT BRIDGE</h2>
+            <span class="screen-subtitle">BROWSER DESKTOP NOTIFICATIONS &amp; DIRECT TELEGRAM WEBHOOK BRIDGE FOR KRAKEN BLOCKS &amp; ALPHA SIGNALS</span>
           </div>
           <button id="btn-request-push" class="btn-amber">
             ${isEnabled ? "✓ PUSH NOTIFICATIONS: ACTIVE" : "🔔 ENABLE BROWSER PUSH NOTIFICATIONS"}
@@ -1141,9 +1362,9 @@ class ApexWebTerminal {
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">FUNDING RATE ANOMALY</span>
-            <span class="kpi-val text-amber">&ge; 50.0% APR</span>
-            <span class="kpi-sub">SQUEEZE WARNING ALERT</span>
+            <span class="kpi-label">TELEGRAM QUANT BOT BRIDGE</span>
+            <span class="kpi-val ${tgConfig.isConfigured ? "text-green" : "text-amber"}">${tgConfig.isConfigured ? "● CONNECTED" : "○ UNCONFIGURED"}</span>
+            <span class="kpi-sub">INSTANT MOBILE ALPHA DISPATCH</span>
           </div>
 
           <div class="kpi-card">
@@ -1152,6 +1373,19 @@ class ApexWebTerminal {
             <span class="kpi-sub">SESSION CASUALTIES</span>
           </div>
         </div>
+
+        <!-- Telegram Quant Bot Webhook Configuration Card -->
+        <section class="terminal-section mt-3">
+          <span class="section-title">📱 TELEGRAM QUANT BOT WEBHOOK BRIDGE (MOBILE ALPHA DISPATCH)</span>
+          <p class="section-desc">Connect your personal Telegram Bot Token (@BotFather) and Chat ID to receive instant Markdown alerts when Kraken blocks (&ge;$1M) or Limit Absorption signals trigger.</p>
+          <div style="display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 10px; align-items: center;" class="mt-2">
+            <input type="password" id="input-tg-token" class="form-input" value="${tgConfig.botToken}" placeholder="Telegram Bot Token (e.g. 123456:ABC-DEF...)" />
+            <input type="text" id="input-tg-chat" class="form-input" value="${tgConfig.chatId}" placeholder="Telegram Chat ID (e.g. 987654321 or @channel)" />
+            <button id="btn-save-tg" class="btn-amber">💾 SAVE BRIDGE</button>
+            <button id="btn-test-tg" class="btn-secondary">🚀 SEND TEST SIGNAL</button>
+          </div>
+          <div id="tg-status-msg" class="text-cyan mt-2" style="font-size: 0.78rem;"></div>
+        </section>
 
         <div class="market-matrix-table-wrap mt-3">
           <table class="terminal-table">
@@ -1204,6 +1438,44 @@ class ApexWebTerminal {
           this.render();
         });
       });
+
+    document.getElementById("btn-save-tg")?.addEventListener("click", () => {
+      playCommandGo();
+      const token =
+        (document.getElementById("input-tg-token") as HTMLInputElement)
+          ?.value || "";
+      const chat =
+        (document.getElementById("input-tg-chat") as HTMLInputElement)?.value ||
+        "";
+      this.alertManager.setTelegramConfig(token, chat);
+      this.render();
+    });
+
+    document.getElementById("btn-test-tg")?.addEventListener("click", () => {
+      playCommandGo();
+      const token =
+        (document.getElementById("input-tg-token") as HTMLInputElement)
+          ?.value || "";
+      const chat =
+        (document.getElementById("input-tg-chat") as HTMLInputElement)?.value ||
+        "";
+      this.alertManager.setTelegramConfig(token, chat);
+      const msgEl = document.getElementById("tg-status-msg");
+      if (msgEl)
+        msgEl.textContent = "Dispatching test quant signal to Telegram...";
+      this.alertManager
+        .sendTelegramMessage(
+          "🎯 QUANT ALPHA BRIDGE TEST",
+          "🟢 LONG ALPHA (BULLISH_BID_ABSORPTION) · BTC/USDT @ $76,942 · Conviction 96%",
+        )
+        .then((ok) => {
+          if (msgEl) {
+            msgEl.textContent = ok
+              ? "✓ Telegram Quant Signal delivered successfully!"
+              : "✕ Delivery failed — verify Bot Token and Chat ID.";
+          }
+        });
+    });
   }
 
   // ==========================================
@@ -1229,6 +1501,10 @@ class ApexWebTerminal {
       .filter((c) => c.trancheCount >= 2).length;
 
     const alphaSignals = this.whaleStream.getAlphaSignals();
+    const alphaAttr = this.alphaTracker.syncSignalsAndPrices(
+      alphaSignals,
+      this.prevPrices,
+    );
 
     const isNetPositive = metrics.netWhaleDeltaUsd >= 0;
 
@@ -1244,6 +1520,8 @@ class ApexWebTerminal {
             <button class="filter-btn ${this.whaleFilter === "100K" ? "active" : ""}" data-filter="100K">&ge; $100K</button>
             <button class="filter-btn ${this.whaleFilter === "500K" ? "active" : ""}" data-filter="500K">&ge; $500K</button>
             <button class="filter-btn ${this.whaleFilter === "1M" ? "active" : ""}" data-filter="1M">&ge; $1M (KRAKEN)</button>
+            <button id="btn-export-whale-csv" class="btn-secondary" title="Export 24h Whale Tranches &amp; Campaigns to CSV">📥 CSV</button>
+            <button id="btn-export-whale-json" class="btn-secondary" title="Export 24h Whale Dataset to JSON">📥 JSON</button>
           </div>
         </div>
 
@@ -1277,9 +1555,9 @@ class ApexWebTerminal {
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">LINKED TRANCHE CAMPAIGNS</span>
-            <span class="kpi-val text-amber">${multiTrancheCount} CAMPAIGNS</span>
-            <span class="kpi-sub">${alphaSignals.length} ACTIVE ALPHA SIGNALS · ${allTrades.filter((t) => t.valueUsd >= 1000000).length} KRAKENS</span>
+            <span class="kpi-label">ALPHA SIGNAL ATTRIBUTION (24H)</span>
+            <span class="kpi-val text-amber">${alphaAttr.winRatePercent.toFixed(0)}% WIN RATE</span>
+            <span class="kpi-sub">AVG EDGE: ${alphaAttr.avgEdgeBps >= 0 ? "+" : ""}${alphaAttr.avgEdgeBps.toFixed(1)} bps · PF ${alphaAttr.profitFactor.toFixed(2)}</span>
           </div>
         </div>
 
@@ -1287,8 +1565,8 @@ class ApexWebTerminal {
         <section class="terminal-section mt-3">
           <div class="section-header-flex">
             <div>
-              <span class="section-title">🎯 HYBRID ALPHA ENGINE: PRE-TRADE ON-CHAIN CORRELATION &amp; LIMIT ABSORPTION RADAR</span>
-              <p class="section-desc">Links unconfirmed Bitcoin Mempool transfers with exchange orderbook tranches, detects passive limit walls absorbing market dumps (Absorption), and reconstructs 24h Binance 15m Taker Delta.</p>
+              <span class="section-title">🎯 HYBRID ALPHA ENGINE: PRE-TRADE ON-CHAIN CORRELATION, ABSORPTION &amp; LIVE PnL ATTRIBUTION</span>
+              <p class="section-desc">Links unconfirmed Bitcoin Mempool transfers with exchange orderbook tranches, detects passive limit walls absorbing market dumps (Absorption), and tracks live MTM PnL (bps) per signal.</p>
             </div>
           </div>
 
@@ -1299,7 +1577,8 @@ class ApexWebTerminal {
                   <th>SIGNAL BIAS</th>
                   <th>ALPHA PATTERN</th>
                   <th>CONVICTION</th>
-                  <th>TRIGGER / VWAP</th>
+                  <th>ENTRY / TRIGGER VWAP</th>
+                  <th>LIVE MTM / MFE EDGE</th>
                   <th>LINKED FLOW</th>
                   <th>INSTITUTIONAL MICROSTRUCTURE RATIONALE</th>
                 </tr>
@@ -1307,13 +1586,20 @@ class ApexWebTerminal {
               <tbody>
                 ${
                   alphaSignals.length === 0
-                    ? `<tr><td colspan="6" class="text-center">Scanning 24h orderflow &amp; mempool for high-conviction absorption and on-chain correlations...</td></tr>`
+                    ? `<tr><td colspan="7" class="text-center">Scanning 24h orderflow &amp; mempool for high-conviction absorption and on-chain correlations...</td></tr>`
                     : alphaSignals
                         .map((sig) => {
                           const dirClass =
                             sig.direction === "LONG"
                               ? "text-green"
                               : "text-red";
+                          const tracked = alphaAttr.positions.get(sig.id);
+                          const retBps = tracked ? tracked.returnBps : 0;
+                          const mfeBps = tracked ? tracked.maxFavorableBps : 0;
+                          const edgeClass =
+                            retBps >= 0 ? "text-green" : "text-red";
+                          const edgeSign = retBps >= 0 ? "+" : "";
+
                           return `
                       <tr class="row-highlight">
                         <td class="${dirClass} font-bold">
@@ -1330,6 +1616,10 @@ class ApexWebTerminal {
                         </td>
                         <td class="font-bold">
                           $${sig.triggerPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
+                        </td>
+                        <td class="${edgeClass} font-bold">
+                          ${edgeSign}${retBps.toFixed(1)} bps
+                          <div class="text-dim" style="font-size: 0.7rem;">MFE: +${mfeBps.toFixed(1)} bps</div>
                         </td>
                         <td>
                           <strong class="text-cyan">$${Math.round(sig.notionalUsd).toLocaleString()}</strong>
@@ -1505,7 +1795,7 @@ class ApexWebTerminal {
   }
 
   private bindWhaleEvents(): void {
-    document.querySelectorAll(".filter-btn").forEach((btn) => {
+    document.querySelectorAll(".filter-btn[data-filter]").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         const filter = (e.currentTarget as HTMLElement).getAttribute(
           "data-filter",
@@ -1517,6 +1807,89 @@ class ApexWebTerminal {
         }
       });
     });
+
+    document
+      .getElementById("btn-export-whale-csv")
+      ?.addEventListener("click", () => {
+        playCommandGo();
+        this.exportWhaleDataset("csv");
+      });
+
+    document
+      .getElementById("btn-export-whale-json")
+      ?.addEventListener("click", () => {
+        playCommandGo();
+        this.exportWhaleDataset("json");
+      });
+  }
+
+  private exportWhaleDataset(format: "csv" | "json"): void {
+    if (typeof document === "undefined") return;
+    const trades = this.whaleStream.getWhaleTrades();
+    const campaigns = this.whaleStream.getTrancheCampaigns();
+    const signals = this.whaleStream.getAlphaSignals();
+
+    let content = "";
+    let mime = "text/plain";
+    let filename = `apex_whale_24h_${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}`;
+
+    if (format === "json") {
+      content = JSON.stringify(
+        {
+          exportedAt: new Date().toISOString(),
+          metrics: this.whaleStream.getMetrics(),
+          alphaSignals: signals,
+          trancheCampaigns: campaigns,
+          whaleTrades: trades,
+        },
+        null,
+        2,
+      );
+      mime = "application/json";
+      filename += ".json";
+    } else {
+      const header = [
+        "timestamp_iso",
+        "venue",
+        "symbol",
+        "side",
+        "price",
+        "quantity",
+        "value_usd",
+        "orders_swept",
+        "campaign_id",
+        "tranche_index",
+        "tx_hash",
+      ].join(",");
+      const rows = trades.map((t) =>
+        [
+          new Date(t.timestamp).toISOString(),
+          t.venue || "BINANCE_SPOT",
+          t.symbol,
+          t.side,
+          t.price,
+          t.quantity,
+          Math.round(t.valueUsd),
+          t.ordersSwept || 1,
+          t.campaignId || "SINGLE",
+          t.trancheIndex || 1,
+          t.txHash || "",
+        ].join(","),
+      );
+      content = [header, ...rows].join("\n");
+      mime = "text/csv";
+      filename += ".csv";
+    }
+
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   // ==========================================

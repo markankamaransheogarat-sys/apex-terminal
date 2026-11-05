@@ -23,6 +23,8 @@ export class AlertManager {
   private whaleThresholdUsd: number = 500_000;
   private liqThresholdUsd: number = 250_000;
   private fundingThresholdApr: number = 50.0;
+  private telegramBotToken: string = "";
+  private telegramChatId: string = "";
   private listeners: Array<(alert: SystemAlert) => void> = [];
 
   public static getInstance(): AlertManager {
@@ -64,6 +66,55 @@ export class AlertManager {
 
   public isNotificationsEnabled(): boolean {
     return this.notificationsEnabled;
+  }
+
+  public setTelegramConfig(botToken: string, chatId: string): void {
+    this.telegramBotToken = botToken.trim();
+    this.telegramChatId = chatId.trim();
+    this.saveSettings();
+  }
+
+  public getTelegramConfig(): {
+    botToken: string;
+    chatId: string;
+    isConfigured: boolean;
+  } {
+    return {
+      botToken: this.telegramBotToken,
+      chatId: this.telegramChatId,
+      isConfigured: Boolean(this.telegramBotToken && this.telegramChatId),
+    };
+  }
+
+  public async sendTelegramMessage(
+    title: string,
+    message: string,
+  ): Promise<boolean> {
+    if (
+      !this.telegramBotToken ||
+      !this.telegramChatId ||
+      typeof fetch === "undefined"
+    ) {
+      return false;
+    }
+    try {
+      const text = `⚡ *APEX // QUANT TERMINAL*\n*${title}*\n${message}\n_${new Date().toISOString()}_`;
+      const res = await fetch(
+        `https://api.telegram.org/bot${this.telegramBotToken}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: this.telegramChatId,
+            text,
+            parse_mode: "Markdown",
+          }),
+        },
+      );
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
 
   public checkWhaleTrade(trade: {
@@ -143,6 +194,15 @@ export class AlertManager {
       }
     }
 
+    // Forward CRITICAL alerts to Telegram Quant Bridge if configured
+    if (
+      alert.severity === "CRITICAL" &&
+      this.telegramBotToken &&
+      this.telegramChatId
+    ) {
+      this.sendTelegramMessage(alert.title, alert.message).catch(() => {});
+    }
+
     // Notify in-app subscribers
     this.listeners.forEach((fn) => {
       try {
@@ -165,6 +225,8 @@ export class AlertManager {
             whaleThresholdUsd: this.whaleThresholdUsd,
             liqThresholdUsd: this.liqThresholdUsd,
             fundingThresholdApr: this.fundingThresholdApr,
+            telegramBotToken: this.telegramBotToken,
+            telegramChatId: this.telegramChatId,
           }),
         );
       } catch {}
@@ -185,6 +247,10 @@ export class AlertManager {
               this.liqThresholdUsd = parsed.liqThresholdUsd;
             if (parsed.fundingThresholdApr)
               this.fundingThresholdApr = parsed.fundingThresholdApr;
+            if (parsed.telegramBotToken)
+              this.telegramBotToken = String(parsed.telegramBotToken);
+            if (parsed.telegramChatId)
+              this.telegramChatId = String(parsed.telegramChatId);
           }
         }
       } catch {}

@@ -3900,6 +3900,8 @@ var CanvasChartRenderer = class {
   ctx;
   data = null;
   options;
+  whaleCampaigns = [];
+  whaleTrades = [];
   hoverX = null;
   hoverY = null;
   hoveredCandle = null;
@@ -3920,12 +3922,18 @@ var CanvasChartRenderer = class {
       showVWAP: true,
       showVolumeProfile: true,
       showGrid: true,
+      showWhaleOverlay: true,
       ...options
     };
     this.bindMouseEvents();
   }
   setData(data) {
     this.data = data;
+    this.render();
+  }
+  setWhaleOverlay(campaigns, trades) {
+    this.whaleCampaigns = campaigns;
+    this.whaleTrades = trades;
     this.render();
   }
   resize() {
@@ -4069,6 +4077,74 @@ var CanvasChartRenderer = class {
         width - this.padRight + 4,
         vwapY + 3
       );
+    }
+    if (this.options.showWhaleOverlay && this.data.symbol) {
+      const sym = this.data.symbol.toUpperCase();
+      const matchingCampaigns = this.whaleCampaigns.filter(
+        (c) => c.symbol.toUpperCase() === sym && c.vwapPrice >= minPrice * 0.985 && c.vwapPrice <= maxPrice * 1.015
+      ).slice(0, 3);
+      for (const camp of matchingCampaigns) {
+        const y = Math.max(
+          this.padTop + 12,
+          Math.min(this.padTop + priceAreaH - 6, priceToY(camp.vwapPrice))
+        );
+        const isBuy = camp.side === "BUY";
+        const lineColor = isBuy ? "rgba(0, 255, 102, 0.75)" : "rgba(255, 51, 68, 0.75)";
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 3]);
+        ctx.beginPath();
+        ctx.moveTo(this.padLeft, y);
+        ctx.lineTo(width - this.padRight, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        const tagText = `\u{1F40B} ${camp.campaignId} ${camp.algoType} VWAP $${camp.vwapPrice.toLocaleString(void 0, { maximumFractionDigits: 2 })} ($${(camp.totalValueUsd / 1e6).toFixed(2)}M \xB7 ${camp.trancheCount}x)`;
+        ctx.font = "bold 10px monospace";
+        const textW = ctx.measureText(tagText).width + 10;
+        ctx.fillStyle = isBuy ? "rgba(0, 40, 22, 0.88)" : "rgba(48, 8, 16, 0.88)";
+        ctx.fillRect(this.padLeft + 8, y - 14, textW, 14);
+        ctx.strokeStyle = lineColor;
+        ctx.strokeRect(this.padLeft + 8, y - 14, textW, 14);
+        ctx.fillStyle = isBuy ? "#00ff66" : "#ff3344";
+        ctx.textAlign = "left";
+        ctx.fillText(tagText, this.padLeft + 13, y - 4);
+      }
+      const symTrades = this.whaleTrades.filter((t) => t.symbol.toUpperCase() === sym && t.valueUsd >= 2e5).slice(0, 15);
+      if (candles.length >= 2 && symTrades.length > 0) {
+        const intervalMs = Math.max(
+          6e4,
+          candles[1].timestamp - candles[0].timestamp
+        );
+        for (const wt of symTrades) {
+          let cIdx = candles.findIndex(
+            (c) => wt.timestamp >= c.timestamp && wt.timestamp < c.timestamp + intervalMs
+          );
+          if (cIdx === -1 && wt.timestamp >= candles[candles.length - 1].timestamp) {
+            cIdx = candles.length - 1;
+          }
+          if (cIdx >= 0) {
+            const cx = this.padLeft + cIdx * candleSpacing + candleSpacing / 2;
+            const cy = Math.max(
+              this.padTop + 10,
+              Math.min(
+                this.padTop + priceAreaH - 10,
+                priceToY(wt.price || candles[cIdx].close)
+              )
+            );
+            const radius = Math.min(
+              11,
+              Math.max(4, Math.sqrt(wt.valueUsd / 8e4) * 3)
+            );
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+            ctx.fillStyle = wt.side === "BUY" ? "rgba(0, 216, 255, 0.55)" : "rgba(255, 153, 0, 0.55)";
+            ctx.fill();
+            ctx.strokeStyle = wt.side === "BUY" ? "#00d8ff" : "#ff9900";
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+          }
+        }
+      }
     }
     const latestCandle = candles[candles.length - 1];
     const curY = priceToY(latestCandle.close);
@@ -4543,6 +4619,8 @@ var AlertManager = class _AlertManager {
   whaleThresholdUsd = 5e5;
   liqThresholdUsd = 25e4;
   fundingThresholdApr = 50;
+  telegramBotToken = "";
+  telegramChatId = "";
   listeners = [];
   static getInstance() {
     if (!this.instance) {
@@ -4577,6 +4655,44 @@ var AlertManager = class _AlertManager {
   }
   isNotificationsEnabled() {
     return this.notificationsEnabled;
+  }
+  setTelegramConfig(botToken, chatId) {
+    this.telegramBotToken = botToken.trim();
+    this.telegramChatId = chatId.trim();
+    this.saveSettings();
+  }
+  getTelegramConfig() {
+    return {
+      botToken: this.telegramBotToken,
+      chatId: this.telegramChatId,
+      isConfigured: Boolean(this.telegramBotToken && this.telegramChatId)
+    };
+  }
+  async sendTelegramMessage(title, message) {
+    if (!this.telegramBotToken || !this.telegramChatId || typeof fetch === "undefined") {
+      return false;
+    }
+    try {
+      const text = `\u26A1 *APEX // QUANT TERMINAL*
+*${title}*
+${message}
+_${(/* @__PURE__ */ new Date()).toISOString()}_`;
+      const res = await fetch(
+        `https://api.telegram.org/bot${this.telegramBotToken}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: this.telegramChatId,
+            text,
+            parse_mode: "Markdown"
+          })
+        }
+      );
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
   checkWhaleTrade(trade) {
     if (trade.valueUsd >= this.whaleThresholdUsd) {
@@ -4630,6 +4746,10 @@ var AlertManager = class _AlertManager {
         }
       }
     }
+    if (alert.severity === "CRITICAL" && this.telegramBotToken && this.telegramChatId) {
+      this.sendTelegramMessage(alert.title, alert.message).catch(() => {
+      });
+    }
     this.listeners.forEach((fn) => {
       try {
         fn(alert);
@@ -4649,7 +4769,9 @@ var AlertManager = class _AlertManager {
             notificationsEnabled: this.notificationsEnabled,
             whaleThresholdUsd: this.whaleThresholdUsd,
             liqThresholdUsd: this.liqThresholdUsd,
-            fundingThresholdApr: this.fundingThresholdApr
+            fundingThresholdApr: this.fundingThresholdApr,
+            telegramBotToken: this.telegramBotToken,
+            telegramChatId: this.telegramChatId
           })
         );
       } catch {
@@ -4670,10 +4792,375 @@ var AlertManager = class _AlertManager {
               this.liqThresholdUsd = parsed.liqThresholdUsd;
             if (parsed.fundingThresholdApr)
               this.fundingThresholdApr = parsed.fundingThresholdApr;
+            if (parsed.telegramBotToken)
+              this.telegramBotToken = String(parsed.telegramBotToken);
+            if (parsed.telegramChatId)
+              this.telegramChatId = String(parsed.telegramChatId);
           }
         }
       } catch {
       }
+    }
+  }
+};
+
+// src/orderbook/orderbook-service.ts
+var OrderbookService = class _OrderbookService {
+  constructor(initialSymbol = "BTCUSDT", WebSocketClass = typeof WebSocket !== "undefined" ? WebSocket : null) {
+    this.WebSocketClass = WebSocketClass;
+    this.symbol = initialSymbol.toUpperCase();
+  }
+  WebSocketClass;
+  symbol = "BTCUSDT";
+  ws = null;
+  snapshot = null;
+  listeners = [];
+  isDestroyed = false;
+  getSymbol() {
+    return this.symbol;
+  }
+  getSnapshot() {
+    return this.snapshot;
+  }
+  onSnapshot(fn) {
+    this.listeners.push(fn);
+    return () => {
+      this.listeners = this.listeners.filter((l) => l !== fn);
+    };
+  }
+  async switchSymbol(newSymbol) {
+    const clean = newSymbol.toUpperCase().trim();
+    const target = clean.endsWith("USDT") ? clean : `${clean}USDT`;
+    if (target === this.symbol && this.snapshot) return;
+    this.symbol = target;
+    this.disconnectWs();
+    await this.fetchRestDepth();
+    this.connectWs();
+  }
+  async start() {
+    await this.fetchRestDepth();
+    this.connectWs();
+  }
+  stop() {
+    this.isDestroyed = true;
+    this.disconnectWs();
+  }
+  disconnectWs() {
+    try {
+      this.ws?.close();
+    } catch {
+    }
+    this.ws = null;
+  }
+  async fetchRestDepth() {
+    if (typeof fetch === "undefined") return this.snapshot;
+    try {
+      const res = await fetch(
+        `https://api.binance.com/api/v3/depth?symbol=${this.symbol}&limit=20`
+      );
+      if (res.ok) {
+        const raw = await res.json();
+        if (raw && Array.isArray(raw.bids) && Array.isArray(raw.asks)) {
+          const snap = _OrderbookService.computeL2Analytics(
+            this.symbol,
+            raw.bids,
+            raw.asks
+          );
+          this.snapshot = snap;
+          this.notify(snap);
+          return snap;
+        }
+      }
+    } catch {
+    }
+    return this.snapshot;
+  }
+  connectWs() {
+    if (this.isDestroyed || !this.WebSocketClass) return;
+    const streamUrl = `wss://stream.binance.com:9443/ws/${this.symbol.toLowerCase()}@depth20@100ms`;
+    try {
+      this.ws = new this.WebSocketClass(streamUrl);
+      this.ws.onmessage = (event) => {
+        try {
+          const raw = JSON.parse(
+            typeof event.data === "string" ? event.data : event.data.toString()
+          );
+          const bids = raw?.bids || raw?.b;
+          const asks = raw?.asks || raw?.a;
+          if (Array.isArray(bids) && Array.isArray(asks)) {
+            const snap = _OrderbookService.computeL2Analytics(
+              this.symbol,
+              bids,
+              asks
+            );
+            this.snapshot = snap;
+            this.notify(snap);
+          }
+        } catch {
+        }
+      };
+      this.ws.onerror = () => {
+        try {
+          this.ws?.close();
+        } catch {
+        }
+      };
+    } catch {
+    }
+  }
+  notify(snap) {
+    for (const fn of this.listeners) {
+      try {
+        fn(snap);
+      } catch {
+      }
+    }
+  }
+  /**
+   * Pure quantitative L2 Orderbook analytics computation.
+   * Accepts raw [priceStr, qtyStr][] arrays for bids and asks.
+   */
+  static computeL2Analytics(symbol, rawBids, rawAsks) {
+    const asset = symbol.toUpperCase().replace("USDT", "");
+    const parsedBids = rawBids.map(([p, q]) => ({
+      price: Number(p),
+      quantity: Number(q)
+    })).filter((x) => x.price > 0 && x.quantity > 0).sort((a, b) => b.price - a.price).slice(0, 20);
+    const parsedAsks = rawAsks.map(([p, q]) => ({
+      price: Number(p),
+      quantity: Number(q)
+    })).filter((x) => x.price > 0 && x.quantity > 0).sort((a, b) => a.price - b.price).slice(0, 20);
+    const bestBid = parsedBids[0]?.price || 0;
+    const bestAsk = parsedAsks[0]?.price || 0;
+    const bestBidQty = parsedBids[0]?.quantity || 0;
+    const bestAskQty = parsedAsks[0]?.quantity || 0;
+    const midPrice = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : bestBid || bestAsk || 0;
+    const spreadUsd = bestBid > 0 && bestAsk > 0 ? Math.max(0, bestAsk - bestBid) : 0;
+    const spreadBps = midPrice > 0 ? spreadUsd / midPrice * 1e4 : 0;
+    const topTotalQty = bestBidQty + bestAskQty;
+    const imbalanceTop = topTotalQty > 0 ? bestBidQty / topTotalQty : 0.5;
+    const microPrice = bestBid > 0 && bestAsk > 0 ? bestBid * (1 - imbalanceTop) + bestAsk * imbalanceTop : midPrice;
+    const microPriceSkewBps = midPrice > 0 ? (microPrice - midPrice) / midPrice * 1e4 : 0;
+    const allNotionals = [];
+    for (const b of parsedBids) allNotionals.push(b.price * b.quantity);
+    for (const a of parsedAsks) allNotionals.push(a.price * a.quantity);
+    const meanLevelUsd = allNotionals.length > 0 ? allNotionals.reduce((acc, v) => acc + v, 0) / allNotionals.length : 1;
+    let cumBidUsd = 0;
+    const bids = parsedBids.map((b) => {
+      const notionalUsd = b.price * b.quantity;
+      cumBidUsd += notionalUsd;
+      const wallMultiple = meanLevelUsd > 0 ? notionalUsd / meanLevelUsd : 1;
+      return {
+        price: b.price,
+        quantity: b.quantity,
+        notionalUsd,
+        cumulativeUsd: cumBidUsd,
+        depthPercent: 0,
+        isWall: wallMultiple >= 2.2,
+        wallMultiple
+      };
+    });
+    let cumAskUsd = 0;
+    const asks = parsedAsks.map((a) => {
+      const notionalUsd = a.price * a.quantity;
+      cumAskUsd += notionalUsd;
+      const wallMultiple = meanLevelUsd > 0 ? notionalUsd / meanLevelUsd : 1;
+      return {
+        price: a.price,
+        quantity: a.quantity,
+        notionalUsd,
+        cumulativeUsd: cumAskUsd,
+        depthPercent: 0,
+        isWall: wallMultiple >= 2.2,
+        wallMultiple
+      };
+    });
+    const maxCumUsd = Math.max(cumBidUsd, cumAskUsd, 1);
+    for (const b of bids) {
+      b.depthPercent = Math.min(100, b.cumulativeUsd / maxCumUsd * 100);
+    }
+    for (const a of asks) {
+      a.depthPercent = Math.min(100, a.cumulativeUsd / maxCumUsd * 100);
+    }
+    const biggestBidWall = [...bids].sort((a, b) => b.notionalUsd - a.notionalUsd)[0] || null;
+    const biggestAskWall = [...asks].sort((a, b) => b.notionalUsd - a.notionalUsd)[0] || null;
+    const totalDepth = cumBidUsd + cumAskUsd;
+    const obi20Percent = totalDepth > 0 ? (cumBidUsd - cumAskUsd) / totalDepth * 100 : 0;
+    const sweepTargetUsd = 5e5;
+    const slippageBuy1M_Bps = _OrderbookService.estimateSweepSlippageBps(
+      asks,
+      midPrice,
+      sweepTargetUsd
+    );
+    const slippageSell1M_Bps = _OrderbookService.estimateSweepSlippageBps(
+      bids,
+      midPrice,
+      sweepTargetUsd
+    );
+    const regime = obi20Percent >= 18 ? "STRONG_BID_SUPPORT" : obi20Percent <= -18 ? "STRONG_ASK_RESISTANCE" : "BALANCED_BOOK";
+    return {
+      symbol: symbol.toUpperCase(),
+      asset,
+      timestamp: Date.now(),
+      bestBid,
+      bestAsk,
+      midPrice,
+      spreadUsd,
+      spreadBps,
+      microPrice,
+      microPriceSkewBps,
+      obi20Percent,
+      totalBidDepthUsd: cumBidUsd,
+      totalAskDepthUsd: cumAskUsd,
+      biggestBidWall,
+      biggestAskWall,
+      slippageBuy1M_Bps,
+      slippageSell1M_Bps,
+      regime,
+      bids,
+      asks
+    };
+  }
+  static estimateSweepSlippageBps(levels, midPrice, targetUsd) {
+    if (levels.length === 0 || midPrice <= 0) return 0;
+    let remainingUsd = targetUsd;
+    let totalCostUsd = 0;
+    let totalCoins = 0;
+    for (const lvl of levels) {
+      const takeUsd = Math.min(remainingUsd, lvl.notionalUsd);
+      const takeCoins = takeUsd / lvl.price;
+      totalCostUsd += takeUsd;
+      totalCoins += takeCoins;
+      remainingUsd -= takeUsd;
+      if (remainingUsd <= 0) break;
+    }
+    if (totalCoins <= 0) return 0;
+    const vwapFill = totalCostUsd / totalCoins;
+    return Math.abs(vwapFill - midPrice) / midPrice * 1e4;
+  }
+};
+
+// src/feeds/alpha-tracker.ts
+var AlphaPerformanceTracker = class _AlphaPerformanceTracker {
+  static STORAGE_KEY = "apex_alpha_attribution_24h";
+  static UNIT_NOTIONAL_USD = 1e5;
+  positions = /* @__PURE__ */ new Map();
+  constructor() {
+    this.loadFromStorage();
+  }
+  syncSignalsAndPrices(signals, livePrices) {
+    const now = Date.now();
+    const cutoff = now - 24 * 3600 * 1e3;
+    for (const sig of signals) {
+      if (!this.positions.has(sig.id) && sig.triggerPrice > 0) {
+        const symbol = `${sig.asset}USDT`;
+        const livePrice = livePrices.get(symbol) || sig.triggerPrice;
+        this.positions.set(sig.id, {
+          signalId: sig.id,
+          asset: sig.asset,
+          symbol,
+          direction: sig.direction,
+          signalType: sig.signalType,
+          conviction: sig.conviction,
+          entryPrice: sig.triggerPrice,
+          currentPrice: livePrice,
+          returnBps: 0,
+          maxFavorableBps: 0,
+          simulatedPnlUsd: 0,
+          status: "FLAT",
+          timestamp: sig.timestamp || now
+        });
+      }
+    }
+    for (const [id, pos] of this.positions.entries()) {
+      if (pos.timestamp < cutoff) {
+        this.positions.delete(id);
+        continue;
+      }
+      const live = livePrices.get(pos.symbol);
+      if (live && live > 0) {
+        pos.currentPrice = live;
+      }
+      if (pos.entryPrice > 0) {
+        const rawMoveBps = (pos.currentPrice - pos.entryPrice) / pos.entryPrice * 1e4;
+        const dirBps = pos.direction === "LONG" ? rawMoveBps : -rawMoveBps;
+        pos.returnBps = Number(dirBps.toFixed(2));
+        if (pos.returnBps > pos.maxFavorableBps) {
+          pos.maxFavorableBps = pos.returnBps;
+        }
+        pos.simulatedPnlUsd = pos.returnBps / 1e4 * _AlphaPerformanceTracker.UNIT_NOTIONAL_USD;
+        pos.status = pos.returnBps >= 0.5 ? "WINNING" : pos.returnBps <= -0.5 ? "DRAWDOWN" : "FLAT";
+      }
+    }
+    this.saveToStorage();
+    return this.getSummary();
+  }
+  getSummary() {
+    const list = Array.from(this.positions.values());
+    if (list.length === 0) {
+      return {
+        totalSignalsTracked: 0,
+        winRatePercent: 0,
+        avgEdgeBps: 0,
+        profitFactor: 1,
+        totalSimulatedPnlUsd: 0,
+        positions: this.positions
+      };
+    }
+    let wins = 0;
+    let grossWinBps = 0;
+    let grossLossBps = 0;
+    let sumBps = 0;
+    let totalPnl = 0;
+    for (const p of list) {
+      const effectiveBps = p.returnBps !== 0 ? p.returnBps : p.maxFavorableBps;
+      if (effectiveBps >= 0) {
+        wins++;
+        grossWinBps += Math.max(0.5, effectiveBps);
+      } else {
+        grossLossBps += Math.abs(effectiveBps);
+      }
+      sumBps += effectiveBps;
+      totalPnl += p.simulatedPnlUsd;
+    }
+    const winRatePercent = wins / list.length * 100;
+    const avgEdgeBps = sumBps / list.length;
+    const profitFactor = grossLossBps > 0 ? grossWinBps / grossLossBps : grossWinBps > 0 ? 3.5 : 1;
+    return {
+      totalSignalsTracked: list.length,
+      winRatePercent,
+      avgEdgeBps,
+      profitFactor,
+      totalSimulatedPnlUsd: totalPnl,
+      positions: this.positions
+    };
+  }
+  saveToStorage() {
+    if (typeof localStorage === "undefined") return;
+    try {
+      const arr = Array.from(this.positions.values()).slice(0, 100);
+      localStorage.setItem(
+        _AlphaPerformanceTracker.STORAGE_KEY,
+        JSON.stringify(arr)
+      );
+    } catch {
+    }
+  }
+  loadFromStorage() {
+    if (typeof localStorage === "undefined") return;
+    try {
+      const raw = localStorage.getItem(_AlphaPerformanceTracker.STORAGE_KEY);
+      if (!raw) return;
+      const arr = JSON.parse(raw);
+      const cutoff = Date.now() - 24 * 3600 * 1e3;
+      if (Array.isArray(arr)) {
+        for (const item of arr) {
+          if (item && item.signalId && item.timestamp >= cutoff) {
+            this.positions.set(item.signalId, item);
+          }
+        }
+      }
+    } catch {
     }
   }
 };
@@ -4688,6 +5175,8 @@ var ApexWebTerminal = class {
   // Additional Subsystems
   chartService;
   chartRenderer = null;
+  orderbookService;
+  alphaTracker;
   newsService;
   newsSnapshot = null;
   newsFilter = "ALL";
@@ -4712,6 +5201,11 @@ var ApexWebTerminal = class {
     this.onChainService = new OnChainVitalityService();
     this.returnsService = HistoricalReturnsService.getInstance();
     this.chartService = new ChartService("BTCUSDT", "1h");
+    this.orderbookService = new OrderbookService(
+      "BTCUSDT",
+      wsConstructor
+    );
+    this.alphaTracker = new AlphaPerformanceTracker();
     this.newsService = NewsService.getInstance();
     this.alertManager = AlertManager.getInstance();
     if (typeof localStorage !== "undefined") {
@@ -4789,6 +5283,7 @@ var ApexWebTerminal = class {
           <div class="quick-commands">
             <button class="cmd-chip active" data-cmd="MARKET">MARKET &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="CHART">\u{1F4C8} CHART &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="BOOK">\u{1F9F1} BOOK &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="WHALE">\u{1F40B} WHALE &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="LIQ">\u26A1 LIQ &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="RISK">RISK &lt;GO&gt;</button>
@@ -4897,6 +5392,8 @@ var ApexWebTerminal = class {
       this.activeScreen = "MARKET";
     } else if (cleaned === "CHART" || cleaned === "CANDLE" || cleaned === "KLINES" || cleaned === "VWAP") {
       this.activeScreen = "CHART";
+    } else if (cleaned === "BOOK" || cleaned === "DEPTH" || cleaned === "L2" || cleaned === "ORDERBOOK" || cleaned === "WALLS") {
+      this.activeScreen = "BOOK";
     } else if (cleaned === "ARB" || cleaned === "BASIS" || cleaned === "ARBITRAGE" || cleaned === "CARRY") {
       this.activeScreen = "ARB";
     } else if (cleaned === "NEWS" || cleaned === "WIRE" || cleaned === "SENTIMENT") {
@@ -5009,8 +5506,19 @@ var ApexWebTerminal = class {
     this.chartService.loadCandles("BTCUSDT", "1h").then((data) => {
       if (this.activeScreen === "CHART" && this.chartRenderer) {
         this.chartRenderer.setData(data);
+        this.chartRenderer.setWhaleOverlay(
+          this.whaleStream.getTrancheCampaigns(),
+          this.whaleStream.getWhaleTrades()
+        );
       }
     });
+    this.orderbookService.onSnapshot(() => {
+      if (this.activeScreen === "BOOK") {
+        const body = document.getElementById("terminal-body");
+        if (body) this.renderOrderbookScreen(body);
+      }
+    });
+    this.orderbookService.start();
     setInterval(() => {
       FundingRateCalculator.fetchLiveFundingRates().then((r) => {
         this.fundingRates = r;
@@ -5099,6 +5607,8 @@ var ApexWebTerminal = class {
       this.renderMarketScreen(body);
     } else if (this.activeScreen === "CHART") {
       this.renderChartScreen(body);
+    } else if (this.activeScreen === "BOOK") {
+      this.renderOrderbookScreen(body);
     } else if (this.activeScreen === "WHALE") {
       this.renderWhaleScreen(body);
     } else if (this.activeScreen === "LIQ") {
@@ -5268,6 +5778,7 @@ var ApexWebTerminal = class {
             <div class="chart-group">
               <span class="returns-badge badge-live">\u25CF VWAP: ON</span>
               <span class="returns-badge badge-live">\u25CF POC PROFILE: ON</span>
+              <span class="returns-badge badge-live">\u25CF \u{1F40B} WHALE CAMPAIGN VWAP &amp; FOOTPRINTS: ON</span>
             </div>
           </div>
 
@@ -5288,11 +5799,16 @@ var ApexWebTerminal = class {
     this.chartRenderer = new CanvasChartRenderer(canvas, {
       showVWAP: true,
       showVolumeProfile: true,
-      showGrid: true
+      showGrid: true,
+      showWhaleOverlay: true
     });
     this.chartRenderer.resize();
     const data = this.chartService.buildChartData();
     this.chartRenderer.setData(data);
+    this.chartRenderer.setWhaleOverlay(
+      this.whaleStream.getTrancheCampaigns(),
+      this.whaleStream.getWhaleTrades()
+    );
     window.addEventListener("resize", () => {
       this.chartRenderer?.resize();
     });
@@ -5319,6 +5835,165 @@ var ApexWebTerminal = class {
         if (tf) {
           playCommandGo();
           this.chartService.loadCandles(this.chartService.getSymbol(), tf).then(() => {
+            this.render();
+          });
+        }
+      });
+    });
+  }
+  // ==========================================
+  // SCREEN: L2 ORDERBOOK DEPTH & LIQUIDITY WALLS (BOOK <GO>)
+  // ==========================================
+  renderOrderbookScreen(container) {
+    const snap = this.orderbookService.getSnapshot();
+    const curSymbol = this.orderbookService.getSymbol();
+    const symbols = ["BTC", "ETH", "SOL", "BNB", "SUI", "XRP", "DOGE"];
+    if (!snap) {
+      container.innerHTML = `
+        <div class="terminal-screen screen-book">
+          <div class="screen-header">
+            <h2 class="screen-title">\u{1F9F1} L2 ORDERBOOK MICROSTRUCTURE, STOIKOV MICRO-PRICE &amp; LIQUIDITY WALLS</h2>
+          </div>
+          <div class="p-4 text-center">Connecting to Binance Spot L2 Depth (@depth20@100ms)...</div>
+        </div>
+      `;
+      return;
+    }
+    const skewSign = snap.microPriceSkewBps >= 0 ? "+" : "";
+    const skewClass = snap.microPriceSkewBps >= 0 ? "text-green" : "text-red";
+    const obiSign = snap.obi20Percent >= 0 ? "+" : "";
+    const obiClass = snap.obi20Percent >= 0 ? "text-green" : "text-red";
+    container.innerHTML = `
+      <div class="terminal-screen screen-book">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">\u{1F9F1} L2 ORDERBOOK DEPTH, STOIKOV MICRO-PRICE &amp; INSTITUTIONAL LIQUIDITY WALLS</h2>
+            <span class="screen-subtitle">BINANCE @DEPTH20@100MS \xB7 STOIKOV (2018) FAIR MICRO-PRICE \xB7 LIMIT WALL DETECTOR (&ge;2.2X MEAN DEPTH)</span>
+          </div>
+          <div class="filter-group">
+            ${symbols.map(
+      (s) => `
+              <button class="filter-btn ${curSymbol.startsWith(s) ? "active" : ""}" data-book-sym="${s}USDT">
+                ${s}
+              </button>
+            `
+    ).join("")}
+          </div>
+        </div>
+
+        <div class="aladdin-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">STOIKOV MICRO-PRICE &amp; ALPHA SKEW</span>
+            <span class="kpi-val ${skewClass}">
+              $${snap.microPrice.toLocaleString(void 0, { minimumFractionDigits: snap.microPrice < 10 ? 4 : 2, maximumFractionDigits: snap.microPrice < 10 ? 4 : 2 })}
+            </span>
+            <span class="kpi-sub">SKEW VS MID: <strong>${skewSign}${snap.microPriceSkewBps.toFixed(2)} bps</strong> \xB7 SPREAD ${snap.spreadBps.toFixed(2)} bps</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">20-LEVEL ORDERBOOK IMBALANCE (OBI-20)</span>
+            <span class="kpi-val ${obiClass}">${obiSign}${snap.obi20Percent.toFixed(1)}%</span>
+            <span class="kpi-sub">${snap.regime} \xB7 BID $${Math.round(snap.totalBidDepthUsd).toLocaleString()} / ASK $${Math.round(snap.totalAskDepthUsd).toLocaleString()}</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">BIGGEST BID WALL (SUPPORT \u041F\u041B\u0418\u0422\u0410)</span>
+            <span class="kpi-val text-green">
+              ${snap.biggestBidWall ? `$${snap.biggestBidWall.price.toLocaleString(void 0, { minimumFractionDigits: snap.midPrice < 10 ? 4 : 2 })}` : "--"}
+            </span>
+            <span class="kpi-sub">
+              ${snap.biggestBidWall ? `$${Math.round(snap.biggestBidWall.notionalUsd).toLocaleString()} (${snap.biggestBidWall.wallMultiple.toFixed(1)}x avg level)` : "--"}
+            </span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">BIGGEST ASK WALL (RESISTANCE \u041F\u041B\u0418\u0422\u0410)</span>
+            <span class="kpi-val text-red">
+              ${snap.biggestAskWall ? `$${snap.biggestAskWall.price.toLocaleString(void 0, { minimumFractionDigits: snap.midPrice < 10 ? 4 : 2 })}` : "--"}
+            </span>
+            <span class="kpi-sub">
+              ${snap.biggestAskWall ? `$${Math.round(snap.biggestAskWall.notionalUsd).toLocaleString()} (${snap.biggestAskWall.wallMultiple.toFixed(1)}x avg level)` : "--"}
+            </span>
+          </div>
+        </div>
+
+        <div class="real-source-banner mt-2">
+          <span class="live-pulse"></span>
+          <span><strong>$500K SWEEP SLIPPAGE ESTIMATOR:</strong> Market BUY Impact: <strong>+${snap.slippageBuy1M_Bps.toFixed(2)} bps</strong> \xB7 Market SELL Impact: <strong>-${snap.slippageSell1M_Bps.toFixed(2)} bps</strong></span>
+          <span class="returns-badge badge-live">\u25CF 100MS L2 DEPTH STREAM ACTIVE</span>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;" class="mt-3">
+          <!-- BIDS LADDER -->
+          <div class="market-matrix-table-wrap">
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>BID PRICE (${snap.asset})</th>
+                  <th>SIZE (${snap.asset})</th>
+                  <th>NOTIONAL ($)</th>
+                  <th>CUMULATIVE ($)</th>
+                  <th>WALL DETECTOR</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${snap.bids.slice(0, 15).map(
+      (b) => `
+                  <tr class="${b.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, rgba(0, 255, 102, 0.12) ${b.depthPercent.toFixed(0)}%, transparent ${b.depthPercent.toFixed(0)}%);">
+                    <td class="text-green font-bold">$${b.price.toLocaleString(void 0, { minimumFractionDigits: b.price < 10 ? 4 : 2 })}</td>
+                    <td>${b.quantity.toLocaleString(void 0, { maximumFractionDigits: 3 })}</td>
+                    <td>$${Math.round(b.notionalUsd).toLocaleString()}</td>
+                    <td class="text-dim">$${Math.round(b.cumulativeUsd).toLocaleString()}</td>
+                    <td>
+                      ${b.isWall ? `<span class="regime-badge regime-squeeze">\u{1F9F1} BID WALL (${b.wallMultiple.toFixed(1)}x)</span>` : `<span class="text-dim">${b.wallMultiple.toFixed(1)}x</span>`}
+                    </td>
+                  </tr>
+                `
+    ).join("")}
+              </tbody>
+            </table>
+          </div>
+
+          <!-- ASKS LADDER -->
+          <div class="market-matrix-table-wrap">
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>ASK PRICE (${snap.asset})</th>
+                  <th>SIZE (${snap.asset})</th>
+                  <th>NOTIONAL ($)</th>
+                  <th>CUMULATIVE ($)</th>
+                  <th>WALL DETECTOR</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${snap.asks.slice(0, 15).map(
+      (a) => `
+                  <tr class="${a.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, rgba(255, 51, 68, 0.12) ${a.depthPercent.toFixed(0)}%, transparent ${a.depthPercent.toFixed(0)}%);">
+                    <td class="text-red font-bold">$${a.price.toLocaleString(void 0, { minimumFractionDigits: a.price < 10 ? 4 : 2 })}</td>
+                    <td>${a.quantity.toLocaleString(void 0, { maximumFractionDigits: 3 })}</td>
+                    <td>$${Math.round(a.notionalUsd).toLocaleString()}</td>
+                    <td class="text-dim">$${Math.round(a.cumulativeUsd).toLocaleString()}</td>
+                    <td>
+                      ${a.isWall ? `<span class="regime-badge regime-extreme">\u{1F9F1} ASK WALL (${a.wallMultiple.toFixed(1)}x)</span>` : `<span class="text-dim">${a.wallMultiple.toFixed(1)}x</span>`}
+                    </td>
+                  </tr>
+                `
+    ).join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `;
+    document.querySelectorAll("[data-book-sym]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const sym = e.currentTarget.getAttribute(
+          "data-book-sym"
+        );
+        if (sym) {
+          playCommandGo();
+          this.orderbookService.switchSymbol(sym).then(() => {
             this.render();
           });
         }
@@ -5528,12 +6203,13 @@ var ApexWebTerminal = class {
   renderAlertsScreen(container) {
     const alerts = this.alertManager.getAlerts();
     const isEnabled = this.alertManager.isNotificationsEnabled();
+    const tgConfig = this.alertManager.getTelegramConfig();
     container.innerHTML = `
       <div class="terminal-screen screen-alert">
         <div class="screen-header">
           <div class="screen-title-group">
-            <h2 class="screen-title">\u{1F514} INSTITUTIONAL REAL-TIME ALERTS &amp; PUSH SYSTEM</h2>
-            <span class="screen-subtitle">BROWSER DESKTOP/MOBILE NOTIFICATIONS FOR KRAKEN BLOCKS, CASUALTIES &amp; VOLATILITY</span>
+            <h2 class="screen-title">\u{1F514} INSTITUTIONAL REAL-TIME ALERTS, PUSH &amp; TELEGRAM QUANT BRIDGE</h2>
+            <span class="screen-subtitle">BROWSER DESKTOP NOTIFICATIONS &amp; DIRECT TELEGRAM WEBHOOK BRIDGE FOR KRAKEN BLOCKS &amp; ALPHA SIGNALS</span>
           </div>
           <button id="btn-request-push" class="btn-amber">
             ${isEnabled ? "\u2713 PUSH NOTIFICATIONS: ACTIVE" : "\u{1F514} ENABLE BROWSER PUSH NOTIFICATIONS"}
@@ -5554,9 +6230,9 @@ var ApexWebTerminal = class {
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">FUNDING RATE ANOMALY</span>
-            <span class="kpi-val text-amber">&ge; 50.0% APR</span>
-            <span class="kpi-sub">SQUEEZE WARNING ALERT</span>
+            <span class="kpi-label">TELEGRAM QUANT BOT BRIDGE</span>
+            <span class="kpi-val ${tgConfig.isConfigured ? "text-green" : "text-amber"}">${tgConfig.isConfigured ? "\u25CF CONNECTED" : "\u25CB UNCONFIGURED"}</span>
+            <span class="kpi-sub">INSTANT MOBILE ALPHA DISPATCH</span>
           </div>
 
           <div class="kpi-card">
@@ -5565,6 +6241,19 @@ var ApexWebTerminal = class {
             <span class="kpi-sub">SESSION CASUALTIES</span>
           </div>
         </div>
+
+        <!-- Telegram Quant Bot Webhook Configuration Card -->
+        <section class="terminal-section mt-3">
+          <span class="section-title">\u{1F4F1} TELEGRAM QUANT BOT WEBHOOK BRIDGE (MOBILE ALPHA DISPATCH)</span>
+          <p class="section-desc">Connect your personal Telegram Bot Token (@BotFather) and Chat ID to receive instant Markdown alerts when Kraken blocks (&ge;$1M) or Limit Absorption signals trigger.</p>
+          <div style="display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 10px; align-items: center;" class="mt-2">
+            <input type="password" id="input-tg-token" class="form-input" value="${tgConfig.botToken}" placeholder="Telegram Bot Token (e.g. 123456:ABC-DEF...)" />
+            <input type="text" id="input-tg-chat" class="form-input" value="${tgConfig.chatId}" placeholder="Telegram Chat ID (e.g. 987654321 or @channel)" />
+            <button id="btn-save-tg" class="btn-amber">\u{1F4BE} SAVE BRIDGE</button>
+            <button id="btn-test-tg" class="btn-secondary">\u{1F680} SEND TEST SIGNAL</button>
+          </div>
+          <div id="tg-status-msg" class="text-cyan mt-2" style="font-size: 0.78rem;"></div>
+        </section>
 
         <div class="market-matrix-table-wrap mt-3">
           <table class="terminal-table">
@@ -5602,6 +6291,30 @@ var ApexWebTerminal = class {
         this.render();
       });
     });
+    document.getElementById("btn-save-tg")?.addEventListener("click", () => {
+      playCommandGo();
+      const token = document.getElementById("input-tg-token")?.value || "";
+      const chat = document.getElementById("input-tg-chat")?.value || "";
+      this.alertManager.setTelegramConfig(token, chat);
+      this.render();
+    });
+    document.getElementById("btn-test-tg")?.addEventListener("click", () => {
+      playCommandGo();
+      const token = document.getElementById("input-tg-token")?.value || "";
+      const chat = document.getElementById("input-tg-chat")?.value || "";
+      this.alertManager.setTelegramConfig(token, chat);
+      const msgEl = document.getElementById("tg-status-msg");
+      if (msgEl)
+        msgEl.textContent = "Dispatching test quant signal to Telegram...";
+      this.alertManager.sendTelegramMessage(
+        "\u{1F3AF} QUANT ALPHA BRIDGE TEST",
+        "\u{1F7E2} LONG ALPHA (BULLISH_BID_ABSORPTION) \xB7 BTC/USDT @ $76,942 \xB7 Conviction 96%"
+      ).then((ok) => {
+        if (msgEl) {
+          msgEl.textContent = ok ? "\u2713 Telegram Quant Signal delivered successfully!" : "\u2715 Delivery failed \u2014 verify Bot Token and Chat ID.";
+        }
+      });
+    });
   }
   // ==========================================
   // SCREEN: WHALE FLOW RADAR & 24H TRANCHE ENGINE
@@ -5618,6 +6331,10 @@ var ApexWebTerminal = class {
     const campaigns = this.whaleStream.getTrancheCampaigns().filter((c) => c.trancheCount >= 2 || c.totalValueUsd >= 2e5).slice(0, 12);
     const multiTrancheCount = this.whaleStream.getTrancheCampaigns().filter((c) => c.trancheCount >= 2).length;
     const alphaSignals = this.whaleStream.getAlphaSignals();
+    const alphaAttr = this.alphaTracker.syncSignalsAndPrices(
+      alphaSignals,
+      this.prevPrices
+    );
     const isNetPositive = metrics.netWhaleDeltaUsd >= 0;
     container.innerHTML = `
       <div class="terminal-screen screen-whale">
@@ -5631,6 +6348,8 @@ var ApexWebTerminal = class {
             <button class="filter-btn ${this.whaleFilter === "100K" ? "active" : ""}" data-filter="100K">&ge; $100K</button>
             <button class="filter-btn ${this.whaleFilter === "500K" ? "active" : ""}" data-filter="500K">&ge; $500K</button>
             <button class="filter-btn ${this.whaleFilter === "1M" ? "active" : ""}" data-filter="1M">&ge; $1M (KRAKEN)</button>
+            <button id="btn-export-whale-csv" class="btn-secondary" title="Export 24h Whale Tranches &amp; Campaigns to CSV">\u{1F4E5} CSV</button>
+            <button id="btn-export-whale-json" class="btn-secondary" title="Export 24h Whale Dataset to JSON">\u{1F4E5} JSON</button>
           </div>
         </div>
 
@@ -5664,9 +6383,9 @@ var ApexWebTerminal = class {
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">LINKED TRANCHE CAMPAIGNS</span>
-            <span class="kpi-val text-amber">${multiTrancheCount} CAMPAIGNS</span>
-            <span class="kpi-sub">${alphaSignals.length} ACTIVE ALPHA SIGNALS \xB7 ${allTrades.filter((t) => t.valueUsd >= 1e6).length} KRAKENS</span>
+            <span class="kpi-label">ALPHA SIGNAL ATTRIBUTION (24H)</span>
+            <span class="kpi-val text-amber">${alphaAttr.winRatePercent.toFixed(0)}% WIN RATE</span>
+            <span class="kpi-sub">AVG EDGE: ${alphaAttr.avgEdgeBps >= 0 ? "+" : ""}${alphaAttr.avgEdgeBps.toFixed(1)} bps \xB7 PF ${alphaAttr.profitFactor.toFixed(2)}</span>
           </div>
         </div>
 
@@ -5674,8 +6393,8 @@ var ApexWebTerminal = class {
         <section class="terminal-section mt-3">
           <div class="section-header-flex">
             <div>
-              <span class="section-title">\u{1F3AF} HYBRID ALPHA ENGINE: PRE-TRADE ON-CHAIN CORRELATION &amp; LIMIT ABSORPTION RADAR</span>
-              <p class="section-desc">Links unconfirmed Bitcoin Mempool transfers with exchange orderbook tranches, detects passive limit walls absorbing market dumps (Absorption), and reconstructs 24h Binance 15m Taker Delta.</p>
+              <span class="section-title">\u{1F3AF} HYBRID ALPHA ENGINE: PRE-TRADE ON-CHAIN CORRELATION, ABSORPTION &amp; LIVE PnL ATTRIBUTION</span>
+              <p class="section-desc">Links unconfirmed Bitcoin Mempool transfers with exchange orderbook tranches, detects passive limit walls absorbing market dumps (Absorption), and tracks live MTM PnL (bps) per signal.</p>
             </div>
           </div>
 
@@ -5686,14 +6405,20 @@ var ApexWebTerminal = class {
                   <th>SIGNAL BIAS</th>
                   <th>ALPHA PATTERN</th>
                   <th>CONVICTION</th>
-                  <th>TRIGGER / VWAP</th>
+                  <th>ENTRY / TRIGGER VWAP</th>
+                  <th>LIVE MTM / MFE EDGE</th>
                   <th>LINKED FLOW</th>
                   <th>INSTITUTIONAL MICROSTRUCTURE RATIONALE</th>
                 </tr>
               </thead>
               <tbody>
-                ${alphaSignals.length === 0 ? `<tr><td colspan="6" class="text-center">Scanning 24h orderflow &amp; mempool for high-conviction absorption and on-chain correlations...</td></tr>` : alphaSignals.map((sig) => {
+                ${alphaSignals.length === 0 ? `<tr><td colspan="7" class="text-center">Scanning 24h orderflow &amp; mempool for high-conviction absorption and on-chain correlations...</td></tr>` : alphaSignals.map((sig) => {
       const dirClass = sig.direction === "LONG" ? "text-green" : "text-red";
+      const tracked = alphaAttr.positions.get(sig.id);
+      const retBps = tracked ? tracked.returnBps : 0;
+      const mfeBps = tracked ? tracked.maxFavorableBps : 0;
+      const edgeClass = retBps >= 0 ? "text-green" : "text-red";
+      const edgeSign = retBps >= 0 ? "+" : "";
       return `
                       <tr class="row-highlight">
                         <td class="${dirClass} font-bold">
@@ -5710,6 +6435,10 @@ var ApexWebTerminal = class {
                         </td>
                         <td class="font-bold">
                           $${sig.triggerPrice.toLocaleString(void 0, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
+                        </td>
+                        <td class="${edgeClass} font-bold">
+                          ${edgeSign}${retBps.toFixed(1)} bps
+                          <div class="text-dim" style="font-size: 0.7rem;">MFE: +${mfeBps.toFixed(1)} bps</div>
                         </td>
                         <td>
                           <strong class="text-cyan">$${Math.round(sig.notionalUsd).toLocaleString()}</strong>
@@ -5849,7 +6578,7 @@ var ApexWebTerminal = class {
     this.renderWhaleScreen(container);
   }
   bindWhaleEvents() {
-    document.querySelectorAll(".filter-btn").forEach((btn) => {
+    document.querySelectorAll(".filter-btn[data-filter]").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         const filter = e.currentTarget.getAttribute(
           "data-filter"
@@ -5861,6 +6590,79 @@ var ApexWebTerminal = class {
         }
       });
     });
+    document.getElementById("btn-export-whale-csv")?.addEventListener("click", () => {
+      playCommandGo();
+      this.exportWhaleDataset("csv");
+    });
+    document.getElementById("btn-export-whale-json")?.addEventListener("click", () => {
+      playCommandGo();
+      this.exportWhaleDataset("json");
+    });
+  }
+  exportWhaleDataset(format) {
+    if (typeof document === "undefined") return;
+    const trades = this.whaleStream.getWhaleTrades();
+    const campaigns = this.whaleStream.getTrancheCampaigns();
+    const signals = this.whaleStream.getAlphaSignals();
+    let content = "";
+    let mime = "text/plain";
+    let filename = `apex_whale_24h_${(/* @__PURE__ */ new Date()).toISOString().slice(0, 19).replace(/:/g, "-")}`;
+    if (format === "json") {
+      content = JSON.stringify(
+        {
+          exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          metrics: this.whaleStream.getMetrics(),
+          alphaSignals: signals,
+          trancheCampaigns: campaigns,
+          whaleTrades: trades
+        },
+        null,
+        2
+      );
+      mime = "application/json";
+      filename += ".json";
+    } else {
+      const header = [
+        "timestamp_iso",
+        "venue",
+        "symbol",
+        "side",
+        "price",
+        "quantity",
+        "value_usd",
+        "orders_swept",
+        "campaign_id",
+        "tranche_index",
+        "tx_hash"
+      ].join(",");
+      const rows = trades.map(
+        (t) => [
+          new Date(t.timestamp).toISOString(),
+          t.venue || "BINANCE_SPOT",
+          t.symbol,
+          t.side,
+          t.price,
+          t.quantity,
+          Math.round(t.valueUsd),
+          t.ordersSwept || 1,
+          t.campaignId || "SINGLE",
+          t.trancheIndex || 1,
+          t.txHash || ""
+        ].join(",")
+      );
+      content = [header, ...rows].join("\n");
+      mime = "text/csv";
+      filename += ".csv";
+    }
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
   // ==========================================
   // SCREEN: LIQUIDATION RADAR

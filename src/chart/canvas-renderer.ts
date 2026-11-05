@@ -5,11 +5,14 @@
  */
 
 import { ChartData, Candle } from "./types.js";
+import { WhaleTrancheCampaign } from "../feeds/whale-cluster-engine.js";
+import { WhaleTrade } from "../feeds/whale-stream.js";
 
 export interface ChartRenderOptions {
   showVWAP?: boolean;
   showVolumeProfile?: boolean;
   showGrid?: boolean;
+  showWhaleOverlay?: boolean;
 }
 
 export class CanvasChartRenderer {
@@ -17,6 +20,8 @@ export class CanvasChartRenderer {
   private ctx: CanvasRenderingContext2D;
   private data: ChartData | null = null;
   private options: ChartRenderOptions;
+  private whaleCampaigns: WhaleTrancheCampaign[] = [];
+  private whaleTrades: WhaleTrade[] = [];
 
   private hoverX: number | null = null;
   private hoverY: number | null = null;
@@ -38,6 +43,7 @@ export class CanvasChartRenderer {
       showVWAP: true,
       showVolumeProfile: true,
       showGrid: true,
+      showWhaleOverlay: true,
       ...options,
     };
 
@@ -46,6 +52,15 @@ export class CanvasChartRenderer {
 
   public setData(data: ChartData): void {
     this.data = data;
+    this.render();
+  }
+
+  public setWhaleOverlay(
+    campaigns: WhaleTrancheCampaign[],
+    trades: WhaleTrade[],
+  ): void {
+    this.whaleCampaigns = campaigns;
+    this.whaleTrades = trades;
     this.render();
   }
 
@@ -237,6 +252,103 @@ export class CanvasChartRenderer {
         width - this.padRight + 4,
         vwapY + 3,
       );
+    }
+
+    // 4B. Institutional Whale Tranche Campaign VWAP Levels & Footprint Bubbles
+    if (this.options.showWhaleOverlay && this.data.symbol) {
+      const sym = this.data.symbol.toUpperCase();
+      const matchingCampaigns = this.whaleCampaigns
+        .filter(
+          (c) =>
+            c.symbol.toUpperCase() === sym &&
+            c.vwapPrice >= minPrice * 0.985 &&
+            c.vwapPrice <= maxPrice * 1.015,
+        )
+        .slice(0, 3);
+
+      for (const camp of matchingCampaigns) {
+        const y = Math.max(
+          this.padTop + 12,
+          Math.min(this.padTop + priceAreaH - 6, priceToY(camp.vwapPrice)),
+        );
+        const isBuy = camp.side === "BUY";
+        const lineColor = isBuy
+          ? "rgba(0, 255, 102, 0.75)"
+          : "rgba(255, 51, 68, 0.75)";
+
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 3]);
+        ctx.beginPath();
+        ctx.moveTo(this.padLeft, y);
+        ctx.lineTo(width - this.padRight, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Draw institutional campaign tag on left side of line
+        const tagText = `🐋 ${camp.campaignId} ${camp.algoType} VWAP $${camp.vwapPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })} ($${(camp.totalValueUsd / 1e6).toFixed(2)}M · ${camp.trancheCount}x)`;
+        ctx.font = "bold 10px monospace";
+        const textW = ctx.measureText(tagText).width + 10;
+        ctx.fillStyle = isBuy
+          ? "rgba(0, 40, 22, 0.88)"
+          : "rgba(48, 8, 16, 0.88)";
+        ctx.fillRect(this.padLeft + 8, y - 14, textW, 14);
+        ctx.strokeStyle = lineColor;
+        ctx.strokeRect(this.padLeft + 8, y - 14, textW, 14);
+        ctx.fillStyle = isBuy ? "#00ff66" : "#ff3344";
+        ctx.textAlign = "left";
+        ctx.fillText(tagText, this.padLeft + 13, y - 4);
+      }
+
+      // Draw Whale Footprint Bubbles on matching candles
+      const symTrades = this.whaleTrades
+        .filter((t) => t.symbol.toUpperCase() === sym && t.valueUsd >= 200000)
+        .slice(0, 15);
+
+      if (candles.length >= 2 && symTrades.length > 0) {
+        const intervalMs = Math.max(
+          60000,
+          candles[1]!.timestamp - candles[0]!.timestamp,
+        );
+        for (const wt of symTrades) {
+          // Find closest candle in time or map to recent candles
+          let cIdx = candles.findIndex(
+            (c) =>
+              wt.timestamp >= c.timestamp &&
+              wt.timestamp < c.timestamp + intervalMs,
+          );
+          if (
+            cIdx === -1 &&
+            wt.timestamp >= candles[candles.length - 1]!.timestamp
+          ) {
+            cIdx = candles.length - 1;
+          }
+          if (cIdx >= 0) {
+            const cx = this.padLeft + cIdx * candleSpacing + candleSpacing / 2;
+            const cy = Math.max(
+              this.padTop + 10,
+              Math.min(
+                this.padTop + priceAreaH - 10,
+                priceToY(wt.price || candles[cIdx]!.close),
+              ),
+            );
+            const radius = Math.min(
+              11,
+              Math.max(4, Math.sqrt(wt.valueUsd / 80000) * 3),
+            );
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+            ctx.fillStyle =
+              wt.side === "BUY"
+                ? "rgba(0, 216, 255, 0.55)"
+                : "rgba(255, 153, 0, 0.55)";
+            ctx.fill();
+            ctx.strokeStyle = wt.side === "BUY" ? "#00d8ff" : "#ff9900";
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+          }
+        }
+      }
     }
 
     // 5. Current Price Line & Badge
