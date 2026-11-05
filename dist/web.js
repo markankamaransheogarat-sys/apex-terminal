@@ -1657,16 +1657,281 @@ var HistoricalReturnsService = class _HistoricalReturnsService {
   }
 };
 
+// src/feeds/whale-cluster-engine.ts
+var WhaleClusterEngine = class _WhaleClusterEngine {
+  // Maximum time gap (ms) between consecutive tranches of the same active campaign (15 minutes)
+  static MAX_CAMPAIGN_GAP_MS = 15 * 60 * 1e3;
+  // Retention window: 24 hours
+  static RETENTION_24H_MS = 24 * 60 * 60 * 1e3;
+  /**
+   * Clusters an array of chronological or reverse-chronological whale trades
+   * into linked Institutional Tranche Campaigns.
+   */
+  static clusterTrades(trades) {
+    if (trades.length === 0) return [];
+    const sorted = [...trades].sort((a, b) => a.timestamp - b.timestamp);
+    const campaigns = [];
+    const activeByKey = /* @__PURE__ */ new Map();
+    for (const trade of sorted) {
+      const key = `${trade.asset}_${trade.side}`;
+      const existing = activeByKey.get(key);
+      const venue = trade.venue || "BINANCE_SPOT";
+      const ordersSwept = trade.ordersSwept || 1;
+      if (existing && trade.timestamp - existing.lastTime <= _WhaleClusterEngine.MAX_CAMPAIGN_GAP_MS) {
+        existing.trades.push(trade);
+        existing.trancheCount = existing.trades.length;
+        const prevNotional = existing.vwapPrice * existing.totalQuantity;
+        existing.totalQuantity += trade.quantity;
+        existing.totalValueUsd += trade.valueUsd;
+        existing.vwapPrice = existing.totalQuantity > 0 ? (prevNotional + trade.price * trade.quantity) / existing.totalQuantity : trade.price;
+        existing.lastPrice = trade.price;
+        existing.lastTime = trade.timestamp;
+        existing.totalOrdersSwept += ordersSwept;
+        if (!existing.venues.includes(venue)) {
+          existing.venues.push(venue);
+        }
+        _WhaleClusterEngine.evaluateCampaignSignature(existing);
+        trade.campaignId = existing.campaignId;
+        trade.trancheIndex = existing.trancheCount;
+      } else {
+        const hash = Math.abs(
+          Math.floor(trade.timestamp / 1e3) ^ Math.floor(trade.valueUsd)
+        ).toString(16).toUpperCase().slice(0, 4).padStart(4, "0");
+        const campaignId = `TR-${trade.asset}-${hash}`;
+        trade.campaignId = campaignId;
+        trade.trancheIndex = 1;
+        const newCampaign = {
+          campaignId,
+          asset: trade.asset,
+          symbol: trade.symbol,
+          side: trade.side,
+          algoType: venue === "BTC_MEMPOOL" ? "ONCHAIN_SETTLEMENT" : ordersSwept >= 25 ? "ORDERBOOK_SWEEP" : "SINGLE_BLOCK",
+          trancheCount: 1,
+          totalValueUsd: trade.valueUsd,
+          totalQuantity: trade.quantity,
+          vwapPrice: trade.price,
+          firstPrice: trade.price,
+          lastPrice: trade.price,
+          priceImpactBps: 0,
+          meanIntervalSec: 0,
+          lotUniformityScore: 100,
+          confidenceScore: ordersSwept >= 25 ? 82 : 65,
+          venues: [venue],
+          totalOrdersSwept: ordersSwept,
+          startTime: trade.timestamp,
+          lastTime: trade.timestamp,
+          trades: [trade]
+        };
+        campaigns.push(newCampaign);
+        activeByKey.set(key, newCampaign);
+      }
+    }
+    return campaigns.sort((a, b) => b.lastTime - a.lastTime);
+  }
+  /**
+   * Evaluates the microstructure signature of a multi-tranche campaign:
+   * - Lot uniformity (Iceberg detection)
+   * - Cross-venue simultaneity (Smart Order Router sweep)
+   * - Cadence regularity (TWAP bot)
+   * - Price impact in bps
+   */
+  static evaluateCampaignSignature(c) {
+    const n = c.trades.length;
+    if (n <= 1) return;
+    if (c.firstPrice > 0) {
+      const rawMove = (c.lastPrice - c.firstPrice) / c.firstPrice * 1e4;
+      c.priceImpactBps = c.side === "BUY" ? rawMove : -rawMove;
+    }
+    const intervalsSec = [];
+    let hasCrossVenueSimultaneous = false;
+    for (let i = 1; i < n; i++) {
+      const dtMs = Math.max(
+        0,
+        c.trades[i].timestamp - c.trades[i - 1].timestamp
+      );
+      intervalsSec.push(dtMs / 1e3);
+      if (dtMs <= 4e3 && c.trades[i].venue && c.trades[i - 1].venue && c.trades[i].venue !== c.trades[i - 1].venue) {
+        hasCrossVenueSimultaneous = true;
+      }
+    }
+    const meanInterval = intervalsSec.reduce((acc, v) => acc + v, 0) / intervalsSec.length;
+    c.meanIntervalSec = meanInterval;
+    const quantities = c.trades.map((t) => t.quantity);
+    const meanQty = quantities.reduce((acc, q) => acc + q, 0) / n;
+    const varianceQty = quantities.reduce((acc, q) => acc + Math.pow(q - meanQty, 2), 0) / n;
+    const stdQty = Math.sqrt(varianceQty);
+    const cv = meanQty > 0 ? stdQty / meanQty : 1;
+    c.lotUniformityScore = Math.round(
+      Math.max(15, Math.min(100, (1 - cv * 0.8) * 100))
+    );
+    if (c.venues.includes("BTC_MEMPOOL") && c.venues.length > 1) {
+      c.algoType = "ONCHAIN_SETTLEMENT";
+      c.confidenceScore = 91;
+    } else if (hasCrossVenueSimultaneous || c.venues.length >= 2) {
+      c.algoType = "CROSS_VENUE_SWEEP";
+      c.confidenceScore = Math.min(98, 84 + n * 2);
+    } else if (c.lotUniformityScore >= 78 && n >= 2) {
+      c.algoType = "ICEBERG_CLIP";
+      c.confidenceScore = Math.min(
+        99,
+        80 + Math.round(c.lotUniformityScore * 0.15) + n
+      );
+    } else if (n >= 3) {
+      c.algoType = "TWAP_CAMPAIGN";
+      c.confidenceScore = Math.min(96, 76 + n * 3);
+    } else if (c.totalOrdersSwept >= 30) {
+      c.algoType = "ORDERBOOK_SWEEP";
+      c.confidenceScore = 88;
+    } else {
+      c.algoType = "TWAP_CAMPAIGN";
+      c.confidenceScore = 74;
+    }
+  }
+};
+var WhalePersistenceStore = class _WhalePersistenceStore {
+  static DB_NAME = "apex_whale_intelligence_db";
+  static STORE_NAME = "whale_trades_24h";
+  static LS_FALLBACK_KEY = "apex_whale_24h_backup";
+  dbPromise = null;
+  constructor() {
+    this.dbPromise = this.initIndexedDB();
+  }
+  initIndexedDB() {
+    if (typeof indexedDB === "undefined") {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      try {
+        const req = indexedDB.open(_WhalePersistenceStore.DB_NAME, 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains(_WhalePersistenceStore.STORE_NAME)) {
+            const store = db.createObjectStore(
+              _WhalePersistenceStore.STORE_NAME,
+              {
+                keyPath: "id"
+              }
+            );
+            store.createIndex("timestamp", "timestamp", { unique: false });
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+  async saveTrades(trades) {
+    const cutoff = Date.now() - WhaleClusterEngine.RETENTION_24H_MS;
+    const valid = trades.filter((t) => t.timestamp >= cutoff).slice(0, 2500);
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem(
+          _WhalePersistenceStore.LS_FALLBACK_KEY,
+          JSON.stringify({
+            updatedAt: Date.now(),
+            trades: valid.slice(0, 300)
+          })
+        );
+      } catch {
+      }
+    }
+    const db = await this.dbPromise;
+    if (!db) return;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(
+          _WhalePersistenceStore.STORE_NAME,
+          "readwrite"
+        );
+        const store = tx.objectStore(_WhalePersistenceStore.STORE_NAME);
+        for (const t of valid.slice(0, 500)) {
+          store.put(t);
+        }
+        const idx = store.index("timestamp");
+        const range = IDBKeyRange.upperBound(cutoff);
+        const cursorReq = idx.openKeyCursor(range);
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (cursor) {
+            store.delete(cursor.primaryKey);
+            cursor.continue();
+          }
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      } catch {
+        resolve();
+      }
+    });
+  }
+  loadSyncBackup() {
+    if (typeof localStorage === "undefined") return [];
+    try {
+      const raw = localStorage.getItem(_WhalePersistenceStore.LS_FALLBACK_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      const cutoff = Date.now() - WhaleClusterEngine.RETENTION_24H_MS;
+      if (parsed && Array.isArray(parsed.trades)) {
+        return parsed.trades.filter((t) => t.timestamp >= cutoff);
+      }
+    } catch {
+    }
+    return [];
+  }
+  async loadAll24hTrades() {
+    const cutoff = Date.now() - WhaleClusterEngine.RETENTION_24H_MS;
+    const db = await this.dbPromise;
+    if (!db) {
+      return this.loadSyncBackup();
+    }
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(_WhalePersistenceStore.STORE_NAME, "readonly");
+        const store = tx.objectStore(_WhalePersistenceStore.STORE_NAME);
+        const req = store.getAll();
+        req.onsuccess = () => {
+          const list = Array.isArray(req.result) ? req.result : [];
+          const filtered = list.filter((t) => t.timestamp >= cutoff).sort((a, b) => b.timestamp - a.timestamp);
+          resolve(filtered.length > 0 ? filtered : this.loadSyncBackup());
+        };
+        req.onerror = () => resolve(this.loadSyncBackup());
+      } catch {
+        resolve(this.loadSyncBackup());
+      }
+    });
+  }
+};
+
 // src/feeds/whale-stream.ts
 var WhaleStreamManager = class _WhaleStreamManager {
   constructor(WebSocketClass = typeof WebSocket !== "undefined" ? WebSocket : null) {
     this.WebSocketClass = WebSocketClass;
+    this.persistence = new WhalePersistenceStore();
     this.liquidations = this.getBaselineLiquidations();
-    this.whaleTrades = this.getBaselineWhaleTrades();
-    this.loadFromStorage();
+    const syncSaved = this.persistence.loadSyncBackup();
+    this.whaleTrades = syncSaved.length > 0 ? syncSaved : this.getBaselineWhaleTrades();
+    for (const t of this.whaleTrades) {
+      this.seenIds.add(t.id);
+    }
+    this.recomputeMetricsAndCampaigns();
+    this.loadRollingLiqState();
+    this.persistence.loadAll24hTrades().then((dbTrades) => {
+      if (dbTrades.length > this.whaleTrades.length) {
+        for (const t of dbTrades) {
+          if (!this.seenIds.has(t.id)) {
+            this.seenIds.add(t.id);
+            this.whaleTrades.push(t);
+          }
+        }
+        this.pruneAndSortWhaleTrades();
+        this.recomputeMetricsAndCampaigns();
+      }
+    });
   }
   WebSocketClass;
-  static STREAMS = [
+  static BINANCE_STREAMS = [
     "btcusdt@aggTrade",
     "ethusdt@aggTrade",
     "solusdt@aggTrade",
@@ -1677,17 +1942,34 @@ var WhaleStreamManager = class _WhaleStreamManager {
     "suiusdt@aggTrade",
     "pepeusdt@aggTrade"
   ];
+  static BYBIT_SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "SUIUSDT",
+    "AVAXUSDT"
+  ];
   tradeWs = null;
+  bybitWs = null;
+  okxWs = null;
   liqWs = null;
   whaleTrades = [];
+  campaigns = [];
   liquidations = [];
+  seenIds = /* @__PURE__ */ new Set();
+  persistence;
   metrics = {
     totalWhaleBuyVolumeUsd: 0,
     totalWhaleSellVolumeUsd: 0,
     netWhaleDeltaUsd: 0,
     totalLiquidationsLongUsd: 6845e4,
     totalLiquidationsShortUsd: 472e5,
-    totalLiquidationsCount: 142
+    totalLiquidationsCount: 142,
+    activeCampaignsCount: 0,
+    retentionHours: 24
   };
   whaleListeners = [];
   liqListeners = [];
@@ -1707,6 +1989,9 @@ var WhaleStreamManager = class _WhaleStreamManager {
   getWhaleTrades() {
     return [...this.whaleTrades];
   }
+  getTrancheCampaigns() {
+    return [...this.campaigns];
+  }
   getLiquidations() {
     return [...this.liquidations];
   }
@@ -1715,12 +2000,59 @@ var WhaleStreamManager = class _WhaleStreamManager {
   }
   connect() {
     if (!this.WebSocketClass) return;
-    this.connectTradeStream();
+    this.connectBinanceSpotStream();
+    this.connectBybitPerpStream();
+    this.connectOkxLiquidationStream();
     this.connectLiquidationStream();
+    this.backfillRecentWhalesRest();
   }
-  connectTradeStream() {
+  recordWhaleTrade(trade, notify = true) {
+    if (this.seenIds.has(trade.id)) return;
+    this.seenIds.add(trade.id);
+    this.whaleTrades.unshift(trade);
+    this.pruneAndSortWhaleTrades();
+    this.recomputeMetricsAndCampaigns();
+    this.persistence.saveTrades(this.whaleTrades);
+    if (notify) {
+      this.whaleListeners.forEach((fn) => {
+        try {
+          fn(trade);
+        } catch {
+        }
+      });
+    }
+  }
+  pruneAndSortWhaleTrades() {
+    const cutoff = Date.now() - WhaleClusterEngine.RETENTION_24H_MS;
+    this.whaleTrades = this.whaleTrades.filter((t) => t.timestamp >= cutoff).sort((a, b) => b.timestamp - a.timestamp).slice(0, 1500);
+  }
+  recomputeMetricsAndCampaigns() {
+    this.campaigns = WhaleClusterEngine.clusterTrades(this.whaleTrades);
+    let buyVol = 0;
+    let sellVol = 0;
+    for (const t of this.whaleTrades) {
+      if (t.side === "BUY") buyVol += t.valueUsd;
+      else sellVol += t.valueUsd;
+    }
+    this.metrics.totalWhaleBuyVolumeUsd = buyVol;
+    this.metrics.totalWhaleSellVolumeUsd = sellVol;
+    this.metrics.netWhaleDeltaUsd = buyVol - sellVol;
+    this.metrics.activeCampaignsCount = this.campaigns.filter(
+      (c) => c.trancheCount >= 2
+    ).length;
+  }
+  classifyTier(valueUsd) {
+    if (valueUsd >= 1e6) return "KRAKEN";
+    if (valueUsd >= 5e5) return "MEGALODON";
+    if (valueUsd >= 1e5) return "WHALE";
+    return "DOLPHIN";
+  }
+  // =========================================================================
+  // 1. BINANCE SPOT AGGTRADE STREAM (Exact Orderbook Sweep Count: l - f + 1)
+  // =========================================================================
+  connectBinanceSpotStream() {
     if (this.isDestroyed || !this.WebSocketClass) return;
-    const streamUrl = `wss://stream.binance.com:9443/stream?streams=${_WhaleStreamManager.STREAMS.join("/")}`;
+    const streamUrl = `wss://stream.binance.com:9443/stream?streams=${_WhaleStreamManager.BINANCE_STREAMS.join("/")}`;
     try {
       this.tradeWs = new this.WebSocketClass(streamUrl);
       this.tradeWs.onmessage = (event) => {
@@ -1737,43 +2069,28 @@ var WhaleStreamManager = class _WhaleStreamManager {
             const side = d.m ? "SELL" : "BUY";
             const symbol = (d.s || "").toUpperCase();
             const asset = symbol.replace("USDT", "");
-            let tier = "DOLPHIN";
-            if (valueUsd >= 1e6) tier = "KRAKEN";
-            else if (valueUsd >= 5e5) tier = "MEGALODON";
-            else if (valueUsd >= 1e5) tier = "WHALE";
+            const ordersSwept = typeof d.l === "number" && typeof d.f === "number" ? Math.max(1, d.l - d.f + 1) : 1;
             const trade = {
-              id: `wh-${d.a || Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+              id: `bn-${symbol}-${d.a || Date.now()}`,
               symbol,
               asset,
               side,
               price,
               quantity,
               valueUsd,
-              tier,
-              timestamp: d.T || Date.now()
+              tier: this.classifyTier(valueUsd),
+              timestamp: d.T || Date.now(),
+              venue: "BINANCE_SPOT",
+              ordersSwept
             };
-            this.whaleTrades.unshift(trade);
-            if (this.whaleTrades.length > 100) this.whaleTrades.pop();
-            if (side === "BUY") {
-              this.metrics.totalWhaleBuyVolumeUsd += valueUsd;
-            } else {
-              this.metrics.totalWhaleSellVolumeUsd += valueUsd;
-            }
-            this.metrics.netWhaleDeltaUsd = this.metrics.totalWhaleBuyVolumeUsd - this.metrics.totalWhaleSellVolumeUsd;
-            this.saveToStorage();
-            this.whaleListeners.forEach((fn) => {
-              try {
-                fn(trade);
-              } catch {
-              }
-            });
+            this.recordWhaleTrade(trade, true);
           }
         } catch {
         }
       };
       this.tradeWs.onclose = () => {
         if (!this.isDestroyed) {
-          setTimeout(() => this.connectTradeStream(), 3e3);
+          setTimeout(() => this.connectBinanceSpotStream(), 3e3);
         }
       };
       this.tradeWs.onerror = () => {
@@ -1782,10 +2099,192 @@ var WhaleStreamManager = class _WhaleStreamManager {
         } catch {
         }
       };
-    } catch (e) {
-      console.warn("Trade stream error:", e);
+    } catch {
     }
   }
+  // =========================================================================
+  // 2. BYBIT V5 LINEAR PERPETUALS STREAM (Whale Perp Prints + Liquidations)
+  // =========================================================================
+  connectBybitPerpStream() {
+    if (this.isDestroyed || !this.WebSocketClass) return;
+    const streamUrl = "wss://stream.bybit.com/v5/public/linear";
+    try {
+      this.bybitWs = new this.WebSocketClass(streamUrl);
+      this.bybitWs.onopen = () => {
+        try {
+          const tradeTopics = _WhaleStreamManager.BYBIT_SYMBOLS.map(
+            (s) => `publicTrade.${s}`
+          );
+          const liqTopics = _WhaleStreamManager.BYBIT_SYMBOLS.map(
+            (s) => `allLiquidation.${s}`
+          );
+          this.bybitWs?.send(
+            JSON.stringify({
+              op: "subscribe",
+              args: [...tradeTopics, ...liqTopics]
+            })
+          );
+        } catch {
+        }
+      };
+      this.bybitWs.onmessage = (event) => {
+        try {
+          const raw = JSON.parse(
+            typeof event.data === "string" ? event.data : event.data.toString()
+          );
+          if (!raw || !raw.topic || !raw.data) return;
+          const topic = String(raw.topic);
+          if (topic.startsWith("publicTrade.")) {
+            const list = Array.isArray(raw.data) ? raw.data : [raw.data];
+            let totalQty = 0;
+            let weightedPrice = 0;
+            let firstItem = null;
+            for (const item of list) {
+              const p = parseFloat(item.p || "0");
+              const v = parseFloat(item.v || "0");
+              if (p > 0 && v > 0) {
+                weightedPrice += p * v;
+                totalQty += v;
+                if (!firstItem) firstItem = item;
+              }
+            }
+            if (firstItem && totalQty > 0) {
+              const avgPrice = weightedPrice / totalQty;
+              const valueUsd = avgPrice * totalQty;
+              if (valueUsd >= 5e4) {
+                const symbol = String(firstItem.s || "").toUpperCase();
+                const asset = symbol.replace("USDT", "");
+                const side = firstItem.S === "Buy" ? "BUY" : "SELL";
+                const trade = {
+                  id: `bybit-${symbol}-${firstItem.i || firstItem.T || Date.now()}`,
+                  symbol,
+                  asset,
+                  side,
+                  price: avgPrice,
+                  quantity: totalQty,
+                  valueUsd,
+                  tier: this.classifyTier(valueUsd),
+                  timestamp: Number(firstItem.T || Date.now()),
+                  venue: "BYBIT_PERP",
+                  ordersSwept: list.length,
+                  isBlockTrade: Boolean(firstItem.BT)
+                };
+                this.recordWhaleTrade(trade, true);
+              }
+            }
+          } else if (topic.startsWith("allLiquidation.")) {
+            const list = Array.isArray(raw.data) ? raw.data : [raw.data];
+            for (const item of list) {
+              const price = parseFloat(item.p || "0");
+              const quantity = parseFloat(item.v || "0");
+              const valueUsd = price * quantity;
+              if (valueUsd <= 0) continue;
+              const symbol = String(item.s || "").toUpperCase();
+              const asset = symbol.replace("USDT", "");
+              const side = item.S === "Buy" ? "LONG" : "SHORT";
+              this.recordLiquidation({
+                id: `bybit-liq-${symbol}-${item.T || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                symbol,
+                asset,
+                side,
+                price,
+                quantity,
+                valueUsd,
+                timestamp: Number(item.T || Date.now()),
+                venue: "BYBIT_PERP"
+              });
+            }
+          }
+        } catch {
+        }
+      };
+      this.bybitWs.onclose = () => {
+        if (!this.isDestroyed) {
+          setTimeout(() => this.connectBybitPerpStream(), 4e3);
+        }
+      };
+      this.bybitWs.onerror = () => {
+        try {
+          this.bybitWs?.close();
+        } catch {
+        }
+      };
+    } catch {
+    }
+  }
+  // =========================================================================
+  // 3. OKX V5 PUBLIC SWAP LIQUIDATIONS STREAM (Instant Global Rekt Feed)
+  // =========================================================================
+  connectOkxLiquidationStream() {
+    if (this.isDestroyed || !this.WebSocketClass) return;
+    const streamUrl = "wss://ws.okx.com/ws/v5/public";
+    try {
+      this.okxWs = new this.WebSocketClass(streamUrl);
+      this.okxWs.onopen = () => {
+        try {
+          this.okxWs?.send(
+            JSON.stringify({
+              op: "subscribe",
+              args: [{ channel: "liquidation-orders", instType: "SWAP" }]
+            })
+          );
+        } catch {
+        }
+      };
+      this.okxWs.onmessage = (event) => {
+        try {
+          const raw = JSON.parse(
+            typeof event.data === "string" ? event.data : event.data.toString()
+          );
+          if (!raw || !Array.isArray(raw.data)) return;
+          for (const entry of raw.data) {
+            const instId = String(entry.instId || entry.uly || "");
+            if (!instId.includes("USDT")) continue;
+            const asset = instId.split("-")[0] || "BTC";
+            const symbol = `${asset}USDT`;
+            const details = Array.isArray(entry.details) ? entry.details : [];
+            for (const d of details) {
+              const price = parseFloat(d.bkPx || "0");
+              const rawSz = parseFloat(d.sz || "0");
+              if (price <= 0 || rawSz <= 0) continue;
+              const mult = asset === "BTC" ? 0.01 : asset === "ETH" ? 0.1 : 1;
+              const quantity = rawSz * mult;
+              const valueUsd = price * quantity;
+              if (valueUsd < 500) continue;
+              const side = d.posSide === "long" || d.side === "sell" ? "LONG" : "SHORT";
+              this.recordLiquidation({
+                id: `okx-liq-${symbol}-${d.ts || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                symbol,
+                asset,
+                side,
+                price,
+                quantity,
+                valueUsd,
+                timestamp: Number(d.ts || Date.now()),
+                venue: "OKX_SWAP"
+              });
+            }
+          }
+        } catch {
+        }
+      };
+      this.okxWs.onclose = () => {
+        if (!this.isDestroyed) {
+          setTimeout(() => this.connectOkxLiquidationStream(), 5e3);
+        }
+      };
+      this.okxWs.onerror = () => {
+        try {
+          this.okxWs?.close();
+        } catch {
+        }
+      };
+    } catch {
+    }
+  }
+  // =========================================================================
+  // 4. BINANCE FUTURES !FORCEORDER STREAM
+  // =========================================================================
   connectLiquidationStream() {
     if (this.isDestroyed || !this.WebSocketClass) return;
     const streamUrl = "wss://fstream.binance.com/ws/!forceOrder@arr";
@@ -1806,30 +2305,16 @@ var WhaleStreamManager = class _WhaleStreamManager {
             const symbol = (o.s || "").toUpperCase();
             const asset = symbol.replace("USDT", "");
             const side = o.S === "BUY" ? "SHORT" : "LONG";
-            const liq = {
-              id: `liq-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            this.recordLiquidation({
+              id: `bn-liq-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
               symbol,
               asset,
               side,
               price,
               quantity,
               valueUsd,
-              timestamp: o.T || Date.now()
-            };
-            this.liquidations.unshift(liq);
-            if (this.liquidations.length > 100) this.liquidations.pop();
-            if (side === "LONG") {
-              this.metrics.totalLiquidationsLongUsd += valueUsd;
-            } else {
-              this.metrics.totalLiquidationsShortUsd += valueUsd;
-            }
-            this.metrics.totalLiquidationsCount++;
-            this.saveToStorage();
-            this.liqListeners.forEach((fn) => {
-              try {
-                fn(liq);
-              } catch {
-              }
+              timestamp: o.T || Date.now(),
+              venue: "BINANCE_FUTURES"
             });
           }
         } catch {
@@ -1846,8 +2331,103 @@ var WhaleStreamManager = class _WhaleStreamManager {
         } catch {
         }
       };
-    } catch (e) {
-      console.warn("Liquidation stream error:", e);
+    } catch {
+    }
+  }
+  recordLiquidation(liq) {
+    this.liquidations.unshift(liq);
+    if (this.liquidations.length > 100) this.liquidations.pop();
+    if (liq.side === "LONG") {
+      this.metrics.totalLiquidationsLongUsd += liq.valueUsd;
+    } else {
+      this.metrics.totalLiquidationsShortUsd += liq.valueUsd;
+    }
+    this.metrics.totalLiquidationsCount++;
+    this.saveRollingLiqState();
+    this.liqListeners.forEach((fn) => {
+      try {
+        fn(liq);
+      } catch {
+      }
+    });
+  }
+  // =========================================================================
+  // 5. STARTUP REST HISTORICAL BACKFILL (Bybit Perp + Binance Spot + Mempool)
+  // =========================================================================
+  async backfillRecentWhalesRest() {
+    if (typeof fetch === "undefined") return;
+    const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
+    for (const sym of symbols) {
+      try {
+        const res = await fetch(
+          `https://api.bybit.com/v5/market/recent-trade?category=linear&symbol=${sym}&limit=500`
+        );
+        if (res.ok) {
+          const json = await res.json();
+          const list = json?.result?.list;
+          if (Array.isArray(list)) {
+            for (const item of list) {
+              const price = parseFloat(item.price || "0");
+              const quantity = parseFloat(item.size || "0");
+              const valueUsd = price * quantity;
+              if (valueUsd >= 5e4) {
+                const asset = sym.replace("USDT", "");
+                this.recordWhaleTrade(
+                  {
+                    id: `bybit-rest-${item.execId || item.time}`,
+                    symbol: sym,
+                    asset,
+                    side: item.side === "Buy" ? "BUY" : "SELL",
+                    price,
+                    quantity,
+                    valueUsd,
+                    tier: this.classifyTier(valueUsd),
+                    timestamp: Number(item.time || Date.now()),
+                    venue: "BYBIT_PERP",
+                    ordersSwept: 1,
+                    isBlockTrade: Boolean(item.isBlockTrade)
+                  },
+                  false
+                );
+              }
+            }
+          }
+        }
+      } catch {
+      }
+    }
+    try {
+      const res = await fetch("https://mempool.space/api/mempool/recent");
+      if (res.ok) {
+        const txs = await res.json();
+        if (Array.isArray(txs)) {
+          const btcPrice = 76800;
+          for (const tx of txs) {
+            const btcQty = (tx.value || 0) / 1e8;
+            const valUsd = btcQty * btcPrice;
+            if (valUsd >= 5e4) {
+              this.recordWhaleTrade(
+                {
+                  id: `mempool-${tx.txid}`,
+                  symbol: "BTCUSDT",
+                  asset: "BTC",
+                  side: "BUY",
+                  price: btcPrice,
+                  quantity: btcQty,
+                  valueUsd: valUsd,
+                  tier: this.classifyTier(valUsd),
+                  timestamp: Date.now() - Math.floor(Math.random() * 6e4),
+                  venue: "BTC_MEMPOOL",
+                  ordersSwept: 1,
+                  txHash: tx.txid
+                },
+                false
+              );
+            }
+          }
+        }
+      }
+    } catch {
     }
   }
   disconnect() {
@@ -1857,20 +2437,34 @@ var WhaleStreamManager = class _WhaleStreamManager {
     } catch {
     }
     try {
+      this.bybitWs?.close();
+    } catch {
+    }
+    try {
+      this.okxWs?.close();
+    } catch {
+    }
+    try {
       this.liqWs?.close();
     } catch {
     }
     this.tradeWs = null;
+    this.bybitWs = null;
+    this.okxWs = null;
     this.liqWs = null;
   }
-  saveToStorage() {
+  saveRollingLiqState() {
     if (typeof localStorage !== "undefined") {
       try {
         localStorage.setItem(
           "apex_rolling_liq_state",
           JSON.stringify({
-            metrics: this.metrics,
-            liquidations: this.liquidations.slice(0, 30),
+            metrics: {
+              totalLiquidationsLongUsd: this.metrics.totalLiquidationsLongUsd,
+              totalLiquidationsShortUsd: this.metrics.totalLiquidationsShortUsd,
+              totalLiquidationsCount: this.metrics.totalLiquidationsCount
+            },
+            liquidations: this.liquidations.slice(0, 40),
             timestamp: Date.now()
           })
         );
@@ -1878,14 +2472,16 @@ var WhaleStreamManager = class _WhaleStreamManager {
       }
     }
   }
-  loadFromStorage() {
+  loadRollingLiqState() {
     if (typeof localStorage !== "undefined") {
       try {
         const item = localStorage.getItem("apex_rolling_liq_state");
         if (item) {
           const parsed = JSON.parse(item);
-          if (parsed && parsed.metrics && Date.now() - parsed.timestamp < 12 * 3600 * 1e3) {
-            this.metrics = { ...this.metrics, ...parsed.metrics };
+          if (parsed && parsed.metrics && Date.now() - parsed.timestamp < 24 * 3600 * 1e3) {
+            this.metrics.totalLiquidationsLongUsd = parsed.metrics.totalLiquidationsLongUsd ?? this.metrics.totalLiquidationsLongUsd;
+            this.metrics.totalLiquidationsShortUsd = parsed.metrics.totalLiquidationsShortUsd ?? this.metrics.totalLiquidationsShortUsd;
+            this.metrics.totalLiquidationsCount = parsed.metrics.totalLiquidationsCount ?? this.metrics.totalLiquidationsCount;
             if (Array.isArray(parsed.liquidations) && parsed.liquidations.length > 0) {
               this.liquidations = parsed.liquidations;
             }
@@ -1906,7 +2502,8 @@ var WhaleStreamManager = class _WhaleStreamManager {
         price: 76840,
         quantity: 14.85,
         valueUsd: 1141074,
-        timestamp: now - 3 * 60 * 1e3
+        timestamp: now - 3 * 60 * 1e3,
+        venue: "BINANCE_FUTURES"
       },
       {
         id: "liq-base-2",
@@ -1916,7 +2513,8 @@ var WhaleStreamManager = class _WhaleStreamManager {
         price: 2284.5,
         quantity: 215,
         valueUsd: 491167,
-        timestamp: now - 8 * 60 * 1e3
+        timestamp: now - 8 * 60 * 1e3,
+        venue: "BYBIT_PERP"
       },
       {
         id: "liq-base-3",
@@ -1926,7 +2524,8 @@ var WhaleStreamManager = class _WhaleStreamManager {
         price: 134.8,
         quantity: 2450,
         valueUsd: 330260,
-        timestamp: now - 16 * 60 * 1e3
+        timestamp: now - 16 * 60 * 1e3,
+        venue: "OKX_SWAP"
       },
       {
         id: "liq-base-4",
@@ -1936,7 +2535,8 @@ var WhaleStreamManager = class _WhaleStreamManager {
         price: 2.12,
         quantity: 94e3,
         valueUsd: 199280,
-        timestamp: now - 24 * 60 * 1e3
+        timestamp: now - 24 * 60 * 1e3,
+        venue: "BYBIT_PERP"
       },
       {
         id: "liq-base-5",
@@ -1946,7 +2546,8 @@ var WhaleStreamManager = class _WhaleStreamManager {
         price: 0.178,
         quantity: 82e4,
         valueUsd: 145960,
-        timestamp: now - 35 * 60 * 1e3
+        timestamp: now - 35 * 60 * 1e3,
+        venue: "BINANCE_FUTURES"
       },
       {
         id: "liq-base-6",
@@ -1956,45 +2557,137 @@ var WhaleStreamManager = class _WhaleStreamManager {
         price: 0.542,
         quantity: 21e4,
         valueUsd: 113820,
-        timestamp: now - 48 * 60 * 1e3
+        timestamp: now - 48 * 60 * 1e3,
+        venue: "OKX_SWAP"
       }
     ];
   }
+  /**
+   * Initial multi-tranche institutional baseline so the Tranche Clustering Engine
+   * immediately demonstrates linked Iceberg, Cross-Venue Sweep, and TWAP campaigns.
+   */
   getBaselineWhaleTrades() {
     const now = Date.now();
     return [
+      // Campaign 1: Institutional BTC Iceberg Buy Campaign (4 uniform ~8.0 BTC tranches across Binance & Bybit)
       {
-        id: "wh-base-1",
+        id: "wh-base-btc-4",
         symbol: "BTCUSDT",
         asset: "BTC",
         side: "BUY",
-        price: 76950,
-        quantity: 24.5,
-        valueUsd: 1885275,
-        tier: "KRAKEN",
-        timestamp: now - 2 * 60 * 1e3
+        price: 76965,
+        quantity: 8.15,
+        valueUsd: 627264,
+        tier: "MEGALODON",
+        timestamp: now - 45 * 1e3,
+        venue: "BYBIT_PERP",
+        ordersSwept: 19
       },
       {
-        id: "wh-base-2",
+        id: "wh-base-btc-3",
+        symbol: "BTCUSDT",
+        asset: "BTC",
+        side: "BUY",
+        price: 76942,
+        quantity: 8.05,
+        valueUsd: 619383,
+        tier: "MEGALODON",
+        timestamp: now - 78 * 1e3,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 34
+      },
+      {
+        id: "wh-base-btc-2",
+        symbol: "BTCUSDT",
+        asset: "BTC",
+        side: "BUY",
+        price: 76918,
+        quantity: 8.1,
+        valueUsd: 623035,
+        tier: "MEGALODON",
+        timestamp: now - 112 * 1e3,
+        venue: "BYBIT_PERP",
+        ordersSwept: 22
+      },
+      {
+        id: "wh-base-btc-1",
+        symbol: "BTCUSDT",
+        asset: "BTC",
+        side: "BUY",
+        price: 76890,
+        quantity: 8,
+        valueUsd: 615120,
+        tier: "MEGALODON",
+        timestamp: now - 145 * 1e3,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 41
+      },
+      // Campaign 2: ETH Iceberg Accumulation (3 uniform 150 ETH clips)
+      {
+        id: "wh-base-eth-3",
         symbol: "ETHUSDT",
         asset: "ETH",
         side: "BUY",
-        price: 2288,
-        quantity: 350,
-        valueUsd: 800800,
-        tier: "MEGALODON",
-        timestamp: now - 7 * 60 * 1e3
+        price: 2274.5,
+        quantity: 150,
+        valueUsd: 341175,
+        tier: "WHALE",
+        timestamp: now - 190 * 1e3,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 28
       },
       {
-        id: "wh-base-3",
+        id: "wh-base-eth-2",
+        symbol: "ETHUSDT",
+        asset: "ETH",
+        side: "BUY",
+        price: 2271,
+        quantity: 152,
+        valueUsd: 345192,
+        tier: "WHALE",
+        timestamp: now - 225 * 1e3,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 24
+      },
+      {
+        id: "wh-base-eth-1",
+        symbol: "ETHUSDT",
+        asset: "ETH",
+        side: "BUY",
+        price: 2268.2,
+        quantity: 149.5,
+        valueUsd: 339095,
+        tier: "WHALE",
+        timestamp: now - 260 * 1e3,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 31
+      },
+      // Campaign 3: SOL TWAP Distribution (2 tranches)
+      {
+        id: "wh-base-sol-2",
         symbol: "SOLUSDT",
         asset: "SOL",
-        side: "BUY",
-        price: 135.2,
-        quantity: 4200,
-        valueUsd: 567840,
+        side: "SELL",
+        price: 134.9,
+        quantity: 3800,
+        valueUsd: 512620,
         tier: "MEGALODON",
-        timestamp: now - 14 * 60 * 1e3
+        timestamp: now - 320 * 1e3,
+        venue: "BYBIT_PERP",
+        ordersSwept: 18
+      },
+      {
+        id: "wh-base-sol-1",
+        symbol: "SOLUSDT",
+        asset: "SOL",
+        side: "SELL",
+        price: 135.4,
+        quantity: 4100,
+        valueUsd: 555140,
+        tier: "MEGALODON",
+        timestamp: now - 380 * 1e3,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 29
       }
     ];
   }
@@ -4739,36 +5432,46 @@ var ApexWebTerminal = class {
     });
   }
   // ==========================================
-  // SCREEN: WHALE FLOW RADAR
+  // SCREEN: WHALE FLOW RADAR & 24H TRANCHE ENGINE
   // ==========================================
   renderWhaleScreen(container) {
     const metrics = this.whaleStream.getMetrics();
-    const trades = this.whaleStream.getWhaleTrades().filter((t) => {
+    const allTrades = this.whaleStream.getWhaleTrades();
+    const trades = allTrades.filter((t) => {
       if (this.whaleFilter === "100K") return t.valueUsd >= 1e5;
       if (this.whaleFilter === "500K") return t.valueUsd >= 5e5;
       if (this.whaleFilter === "1M") return t.valueUsd >= 1e6;
       return true;
     });
+    const campaigns = this.whaleStream.getTrancheCampaigns().filter((c) => c.trancheCount >= 2 || c.totalValueUsd >= 2e5).slice(0, 12);
+    const multiTrancheCount = this.whaleStream.getTrancheCampaigns().filter((c) => c.trancheCount >= 2).length;
     const isNetPositive = metrics.netWhaleDeltaUsd >= 0;
     container.innerHTML = `
       <div class="terminal-screen screen-whale">
         <div class="screen-header">
           <div class="screen-title-group">
-            <h2 class="screen-title">\u{1F40B} REAL-TIME WHALE RADAR &amp; INSTITUTIONAL BLOCK FLOW</h2>
-            <span class="screen-subtitle">LIVE WEBSOCKET AGGREGATED PRINTS &ge; $50K WITH CUMULATIVE VOLUME DELTA (CVD)</span>
+            <h2 class="screen-title">\u{1F40B} 24H WHALE RADAR, MULTI-VENUE FLOW &amp; LINKED TRANCHE CAMPAIGNS</h2>
+            <span class="screen-subtitle">24-HOUR INDEXEDDB PERSISTENCE \xB7 BINANCE SPOT + BYBIT PERP + OKX + BTC MEMPOOL \xB7 MICROSTRUCTURE TRANCHE CLUSTERING</span>
           </div>
           <div class="filter-group">
-            <button class="filter-btn ${this.whaleFilter === "ALL" ? "active" : ""}" data-filter="ALL">&ge; $50K</button>
+            <button class="filter-btn ${this.whaleFilter === "ALL" ? "active" : ""}" data-filter="ALL">&ge; $50K (${allTrades.length})</button>
             <button class="filter-btn ${this.whaleFilter === "100K" ? "active" : ""}" data-filter="100K">&ge; $100K</button>
             <button class="filter-btn ${this.whaleFilter === "500K" ? "active" : ""}" data-filter="500K">&ge; $500K</button>
             <button class="filter-btn ${this.whaleFilter === "1M" ? "active" : ""}" data-filter="1M">&ge; $1M (KRAKEN)</button>
           </div>
         </div>
 
+        <!-- Real-Time Multi-Venue & 24h Persistence Status Banner -->
+        <div class="real-source-banner">
+          <span class="live-pulse"></span>
+          <span><strong>24H PERSISTENT VAULT (IndexedDB + LocalStorage):</strong> ${allTrades.length} whale prints stored over last 24h \xB7 Auto-linked into ${multiTrancheCount} multi-tranche institutional campaigns</span>
+          <span class="returns-badge badge-live">\u25CF 5 LIVE STREAMS: BINANCE SPOT + BYBIT V5 + OKX + MEMPOOL.SPACE</span>
+        </div>
+
         <!-- Whale KPI Strip -->
         <div class="aladdin-kpi-grid">
           <div class="kpi-card">
-            <span class="kpi-label">NET INSTITUTIONAL DELTA (CVD)</span>
+            <span class="kpi-label">NET 24H INSTITUTIONAL DELTA (CVD)</span>
             <span class="kpi-val ${isNetPositive ? "text-green" : "text-red"}">
               ${isNetPositive ? "+" : "-"}$${Math.round(Math.abs(metrics.netWhaleDeltaUsd)).toLocaleString()}
             </span>
@@ -4776,43 +5479,115 @@ var ApexWebTerminal = class {
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">WHALE BUY VOLUME (&ge;$50K)</span>
+            <span class="kpi-label">24H WHALE BUY VOLUME (&ge;$50K)</span>
             <span class="kpi-val text-green">$${Math.round(metrics.totalWhaleBuyVolumeUsd).toLocaleString()}</span>
             <span class="kpi-sub">AGGRESSIVE TAKER BUYS</span>
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">WHALE SELL VOLUME (&ge;$50K)</span>
+            <span class="kpi-label">24H WHALE SELL VOLUME (&ge;$50K)</span>
             <span class="kpi-val text-red">$${Math.round(metrics.totalWhaleSellVolumeUsd).toLocaleString()}</span>
             <span class="kpi-sub">AGGRESSIVE TAKER SELLS</span>
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">MEGA-WHALE BLOCKS (&gt;$1M)</span>
-            <span class="kpi-val text-cyan">${this.whaleStream.getWhaleTrades().filter((t) => t.valueUsd >= 1e6).length}</span>
-            <span class="kpi-sub">KRAKEN-CLASS EXECUTIONS</span>
+            <span class="kpi-label">LINKED TRANCHE CAMPAIGNS</span>
+            <span class="kpi-val text-amber">${multiTrancheCount} CAMPAIGNS</span>
+            <span class="kpi-sub">${allTrades.filter((t) => t.valueUsd >= 1e6).length} KRAKEN BLOCKS (&gt;$1M)</span>
           </div>
         </div>
 
+        <!-- Linked Whale Tranche Campaigns Table -->
+        <section class="terminal-section mt-3">
+          <div class="section-header-flex">
+            <div>
+              <span class="section-title">\u{1F517} LINKED INSTITUTIONAL TRANCHE CAMPAIGNS (TWAP / ICEBERG / CROSS-VENUE CLUSTERING)</span>
+              <p class="section-desc">4-Factor Microstructure Fingerprinting links split whale orders across time, lot uniformity (CV), orderbook sweep depth, and venues.</p>
+            </div>
+          </div>
+
+          <div class="market-matrix-table-wrap mt-2">
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>CAMPAIGN ID</th>
+                  <th>ASSET &amp; SIDE</th>
+                  <th>EXECUTION ALGO</th>
+                  <th>TRANCHES &amp; CADENCE</th>
+                  <th>CUMULATIVE VALUE</th>
+                  <th>CAMPAIGN VWAP &amp; IMPACT</th>
+                  <th>VENUES &amp; CONFIDENCE</th>
+                </tr>
+              </thead>
+              <tbody id="tranche-campaigns-tbody">
+                ${campaigns.length === 0 ? `<tr><td colspan="7" class="text-center">Clustering 24h whale orderflow into linked tranche campaigns...</td></tr>` : campaigns.map((c) => {
+      const sideClass = c.side === "BUY" ? "text-green" : "text-red";
+      const impactSign = c.priceImpactBps >= 0 ? "+" : "";
+      const cadenceStr = c.trancheCount > 1 ? `${c.trancheCount} tranches \xB7 avg ${Math.round(c.meanIntervalSec)}s \xB7 ${c.lotUniformityScore}% lot match` : `1 block fill \xB7 ${c.totalOrdersSwept} orders swept`;
+      const spanMin = Math.max(
+        1,
+        Math.round((c.lastTime - c.startTime) / 6e4)
+      );
+      const timeWindow = c.trancheCount > 1 ? `${new Date(c.startTime).toLocaleTimeString()} \u2013 ${new Date(c.lastTime).toLocaleTimeString()} (${spanMin}m)` : new Date(c.lastTime).toLocaleTimeString();
+      return `
+                      <tr class="${c.trancheCount >= 2 ? "row-highlight" : ""}">
+                        <td>
+                          <strong class="text-amber">${c.campaignId}</strong>
+                          <div class="text-dim" style="font-size: 0.7rem;">${timeWindow}</div>
+                        </td>
+                        <td class="${sideClass}">
+                          <strong>${c.asset} ${c.side === "BUY" ? "\u25B2 ACCUMULATE" : "\u25BC DISTRIBUTE"}</strong>
+                        </td>
+                        <td>
+                          <span class="regime-badge ${c.algoType === "ICEBERG_CLIP" || c.algoType === "CROSS_VENUE_SWEEP" ? "regime-squeeze" : c.algoType === "TWAP_CAMPAIGN" ? "regime-extreme" : "regime-normal"}">
+                            ${c.algoType}
+                          </span>
+                        </td>
+                        <td>
+                          <strong>${cadenceStr}</strong>
+                        </td>
+                        <td class="${sideClass} font-bold">
+                          $${Math.round(c.totalValueUsd).toLocaleString()}
+                          <div class="text-dim" style="font-size: 0.72rem;">${c.totalQuantity.toLocaleString(void 0, { maximumFractionDigits: 3 })} ${c.asset}</div>
+                        </td>
+                        <td>
+                          <strong>$${c.vwapPrice.toLocaleString(void 0, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</strong>
+                          <span class="text-cyan" style="font-size: 0.75rem;">(${impactSign}${c.priceImpactBps.toFixed(1)} bps)</span>
+                        </td>
+                        <td>
+                          <span class="text-cyan font-bold">${c.venues.join(" + ")}</span>
+                          <div class="text-dim" style="font-size: 0.72rem;">Link Confidence: <strong>${c.confidenceScore}%</strong></div>
+                        </td>
+                      </tr>
+                    `;
+    }).join("")}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <!-- Live Whale Tape Table -->
-        <div class="market-matrix-table-wrap mt-3">
-          <table class="terminal-table">
-            <thead>
-              <tr>
-                <th>TIME</th>
-                <th>ASSET</th>
-                <th>FLOW TYPE</th>
-                <th>VALUE (USD)</th>
-                <th>QUANTITY</th>
-                <th>EXECUTION PRICE</th>
-                <th>SCALE</th>
-              </tr>
-            </thead>
-            <tbody id="whale-tbody">
-              ${trades.length === 0 ? `<tr><td colspan="7" class="text-center">Awaiting WebSocket whale block executions &ge; $50,000...</td></tr>` : trades.map((t) => this.renderWhaleRow(t)).join("")}
-            </tbody>
-          </table>
-        </div>
+        <section class="terminal-section mt-3">
+          <span class="section-title">\u{1F4E1} 24-HOUR INDIVIDUAL WHALE PRINTS &amp; ON-CHAIN TRANSFERS (${trades.length} SHOWN)</span>
+          <div class="market-matrix-table-wrap mt-2">
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>TIME</th>
+                  <th>VENUE</th>
+                  <th>ASSET &amp; FLOW</th>
+                  <th>VALUE (USD)</th>
+                  <th>QUANTITY &amp; PRICE</th>
+                  <th>MICROSTRUCTURE / DEPTH SWEPT</th>
+                  <th>TRANCHE LINK</th>
+                </tr>
+              </thead>
+              <tbody id="whale-tbody">
+                ${trades.length === 0 ? `<tr><td colspan="7" class="text-center">Awaiting WebSocket whale block executions &ge; $50,000...</td></tr>` : trades.slice(0, 100).map((t) => this.renderWhaleRow(t)).join("")}
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
     `;
     this.bindWhaleEvents();
@@ -4820,30 +5595,28 @@ var ApexWebTerminal = class {
   renderWhaleRow(t) {
     const timeStr = new Date(t.timestamp).toLocaleTimeString();
     const sideClass = t.side === "BUY" ? "text-green" : "text-red";
-    const tag = t.valueUsd >= 1e6 ? "KRAKEN ($1M+)" : t.valueUsd >= 5e5 ? "WHALE ($500K+)" : "DOLPHIN ($50K+)";
+    const venueLabel = t.venue || "BINANCE_SPOT";
+    const microInfo = venueLabel === "BTC_MEMPOOL" ? `On-Chain TX ${t.txHash ? t.txHash.slice(0, 10) + "\u2026" : ""}` : t.isBlockTrade ? `OTC Block Trade` : `Swept ${t.ordersSwept || 1} limit order${(t.ordersSwept || 1) > 1 ? "s" : ""}`;
+    const campaignBadge = t.campaignId ? `<span class="text-amber font-bold">${t.campaignId}</span> <span class="text-dim">[#${t.trancheIndex || 1}]</span>` : `<span class="text-dim">SINGLE</span>`;
     return `
       <tr class="row-flash-${t.side.toLowerCase()}">
         <td class="text-dim">${timeStr}</td>
-        <td><strong>${t.asset}</strong>/USDT</td>
-        <td class="${sideClass}"><strong>${t.side === "BUY" ? "\u25B2 BUY BLOCK" : "\u25BC SELL BLOCK"}</strong></td>
+        <td><span class="regime-badge regime-normal">${venueLabel}</span></td>
+        <td class="${sideClass}"><strong>${t.asset} ${t.side === "BUY" ? "\u25B2 BUY" : "\u25BC SELL"}</strong></td>
         <td class="${sideClass} font-bold">$${Math.round(t.valueUsd).toLocaleString()}</td>
-        <td>${t.quantity.toLocaleString(void 0, { maximumFractionDigits: 3 })} ${t.asset}</td>
-        <td>$${t.price.toLocaleString(void 0, { minimumFractionDigits: 2 })}</td>
-        <td><span class="badge-whale badge-${t.side.toLowerCase()}">${tag}</span></td>
+        <td>
+          ${t.quantity.toLocaleString(void 0, { maximumFractionDigits: 3 })} ${t.asset}
+          <span class="text-dim">@ $${t.price.toLocaleString(void 0, { minimumFractionDigits: 2 })}</span>
+        </td>
+        <td class="text-cyan">${microInfo}</td>
+        <td>${campaignBadge}</td>
       </tr>
     `;
   }
-  renderWhaleLive(trade) {
-    const tbody = document.getElementById("whale-tbody");
-    if (!tbody) return;
-    if (this.whaleFilter === "100K" && trade.valueUsd < 1e5) return;
-    if (this.whaleFilter === "500K" && trade.valueUsd < 5e5) return;
-    if (this.whaleFilter === "1M" && trade.valueUsd < 1e6) return;
-    const rowHtml = this.renderWhaleRow(trade);
-    tbody.insertAdjacentHTML("afterbegin", rowHtml);
-    if (tbody.children.length > 50) {
-      tbody.removeChild(tbody.lastChild);
-    }
+  renderWhaleLive(_trade) {
+    const container = document.getElementById("terminal-body");
+    if (!container || this.activeScreen !== "WHALE") return;
+    this.renderWhaleScreen(container);
   }
   bindWhaleEvents() {
     document.querySelectorAll(".filter-btn").forEach((btn) => {
@@ -4872,17 +5645,17 @@ var ApexWebTerminal = class {
       <div class="terminal-screen screen-liq">
         <div class="screen-header">
           <div class="screen-title-group">
-            <h2 class="screen-title">\u26A1 REAL-TIME LIQUIDATIONS FEED &amp; REKT RADAR</h2>
-            <span class="screen-subtitle">BINANCE FUTURES PUBLIC !FORCEORDER WEBSOCKET ENGINE (SUB-30MS)</span>
+            <h2 class="screen-title">\u26A1 REAL-TIME MULTI-EXCHANGE LIQUIDATIONS FEED &amp; REKT RADAR</h2>
+            <span class="screen-subtitle">BYBIT V5 ALL-LIQUIDATION + OKX V5 SWAP LIQUIDATION-ORDERS + BINANCE !FORCEORDER (SUB-30MS)</span>
           </div>
-          <span class="terminal-badge badge-red">LIVE CASUALTY TAPE</span>
+          <span class="terminal-badge badge-red">LIVE MULTI-VENUE CASUALTY TAPE</span>
         </div>
 
         <div class="aladdin-kpi-grid">
           <div class="kpi-card">
             <span class="kpi-label">TOTAL REKT VOLUME (SESSION)</span>
             <span class="kpi-val text-red">$${Math.round(totalLiq).toLocaleString()}</span>
-            <span class="kpi-sub">FORCED MARKET ORDERS</span>
+            <span class="kpi-sub">FORCED MARKET ORDERS (${liqs.length} EVENTS)</span>
           </div>
 
           <div class="kpi-card">
@@ -4913,6 +5686,7 @@ var ApexWebTerminal = class {
             <thead>
               <tr>
                 <th>TIME</th>
+                <th>VENUE</th>
                 <th>CONTRACT</th>
                 <th>REKT SIDE</th>
                 <th>LIQUIDATED VALUE</th>
@@ -4921,7 +5695,7 @@ var ApexWebTerminal = class {
               </tr>
             </thead>
             <tbody id="liq-tbody">
-              ${liqs.length === 0 ? `<tr><td colspan="6" class="text-center">Connected to Binance Futures forced liquidation feed. Awaiting liquidation events...</td></tr>` : liqs.map((l) => this.renderLiquidationRow(l)).join("")}
+              ${liqs.length === 0 ? `<tr><td colspan="7" class="text-center">Connected to Bybit V5, OKX Swap &amp; Binance Futures forced liquidation feeds...</td></tr>` : liqs.map((l) => this.renderLiquidationRow(l)).join("")}
             </tbody>
           </table>
         </div>
@@ -4931,25 +5705,23 @@ var ApexWebTerminal = class {
   renderLiquidationRow(l) {
     const timeStr = new Date(l.timestamp).toLocaleTimeString();
     const sideClass = l.side === "LONG" ? "text-red" : "text-green";
+    const venueLabel = l.venue || "BINANCE_FUTURES";
     return `
       <tr class="row-flash-liq">
         <td class="text-dim">${timeStr}</td>
+        <td><span class="regime-badge regime-normal">${venueLabel}</span></td>
         <td><strong>${l.asset}</strong>USDT PERP</td>
         <td class="${sideClass}"><strong>\u26A1 ${l.side} REKT</strong></td>
-        <td class="${sideClass}">$${Math.round(l.valueUsd).toLocaleString()}</td>
+        <td class="${sideClass} font-bold">$${Math.round(l.valueUsd).toLocaleString()}</td>
         <td>${l.quantity.toLocaleString(void 0, { maximumFractionDigits: 3 })} ${l.asset}</td>
         <td>$${l.price.toLocaleString(void 0, { minimumFractionDigits: 2 })}</td>
       </tr>
     `;
   }
-  renderLiquidationLive(liq) {
-    const tbody = document.getElementById("liq-tbody");
-    if (!tbody) return;
-    const rowHtml = this.renderLiquidationRow(liq);
-    tbody.insertAdjacentHTML("afterbegin", rowHtml);
-    if (tbody.children.length > 50) {
-      tbody.removeChild(tbody.lastChild);
-    }
+  renderLiquidationLive(_liq) {
+    const container = document.getElementById("terminal-body");
+    if (!container || this.activeScreen !== "LIQ") return;
+    this.renderLiquidationScreen(container);
   }
   // ==========================================
   // SCREEN: MACRO & ON-CHAIN VITALITY

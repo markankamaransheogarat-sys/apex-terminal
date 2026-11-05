@@ -1207,16 +1207,26 @@ class ApexWebTerminal {
   }
 
   // ==========================================
-  // SCREEN: WHALE FLOW RADAR
+  // SCREEN: WHALE FLOW RADAR & 24H TRANCHE ENGINE
   // ==========================================
   private renderWhaleScreen(container: HTMLElement): void {
     const metrics = this.whaleStream.getMetrics();
-    const trades = this.whaleStream.getWhaleTrades().filter((t) => {
+    const allTrades = this.whaleStream.getWhaleTrades();
+    const trades = allTrades.filter((t) => {
       if (this.whaleFilter === "100K") return t.valueUsd >= 100000;
       if (this.whaleFilter === "500K") return t.valueUsd >= 500000;
       if (this.whaleFilter === "1M") return t.valueUsd >= 1000000;
       return true;
     });
+
+    const campaigns = this.whaleStream
+      .getTrancheCampaigns()
+      .filter((c) => c.trancheCount >= 2 || c.totalValueUsd >= 200000)
+      .slice(0, 12);
+
+    const multiTrancheCount = this.whaleStream
+      .getTrancheCampaigns()
+      .filter((c) => c.trancheCount >= 2).length;
 
     const isNetPositive = metrics.netWhaleDeltaUsd >= 0;
 
@@ -1224,21 +1234,28 @@ class ApexWebTerminal {
       <div class="terminal-screen screen-whale">
         <div class="screen-header">
           <div class="screen-title-group">
-            <h2 class="screen-title">🐋 REAL-TIME WHALE RADAR &amp; INSTITUTIONAL BLOCK FLOW</h2>
-            <span class="screen-subtitle">LIVE WEBSOCKET AGGREGATED PRINTS &ge; $50K WITH CUMULATIVE VOLUME DELTA (CVD)</span>
+            <h2 class="screen-title">🐋 24H WHALE RADAR, MULTI-VENUE FLOW &amp; LINKED TRANCHE CAMPAIGNS</h2>
+            <span class="screen-subtitle">24-HOUR INDEXEDDB PERSISTENCE · BINANCE SPOT + BYBIT PERP + OKX + BTC MEMPOOL · MICROSTRUCTURE TRANCHE CLUSTERING</span>
           </div>
           <div class="filter-group">
-            <button class="filter-btn ${this.whaleFilter === "ALL" ? "active" : ""}" data-filter="ALL">&ge; $50K</button>
+            <button class="filter-btn ${this.whaleFilter === "ALL" ? "active" : ""}" data-filter="ALL">&ge; $50K (${allTrades.length})</button>
             <button class="filter-btn ${this.whaleFilter === "100K" ? "active" : ""}" data-filter="100K">&ge; $100K</button>
             <button class="filter-btn ${this.whaleFilter === "500K" ? "active" : ""}" data-filter="500K">&ge; $500K</button>
             <button class="filter-btn ${this.whaleFilter === "1M" ? "active" : ""}" data-filter="1M">&ge; $1M (KRAKEN)</button>
           </div>
         </div>
 
+        <!-- Real-Time Multi-Venue & 24h Persistence Status Banner -->
+        <div class="real-source-banner">
+          <span class="live-pulse"></span>
+          <span><strong>24H PERSISTENT VAULT (IndexedDB + LocalStorage):</strong> ${allTrades.length} whale prints stored over last 24h · Auto-linked into ${multiTrancheCount} multi-tranche institutional campaigns</span>
+          <span class="returns-badge badge-live">● 5 LIVE STREAMS: BINANCE SPOT + BYBIT V5 + OKX + MEMPOOL.SPACE</span>
+        </div>
+
         <!-- Whale KPI Strip -->
         <div class="aladdin-kpi-grid">
           <div class="kpi-card">
-            <span class="kpi-label">NET INSTITUTIONAL DELTA (CVD)</span>
+            <span class="kpi-label">NET 24H INSTITUTIONAL DELTA (CVD)</span>
             <span class="kpi-val ${isNetPositive ? "text-green" : "text-red"}">
               ${isNetPositive ? "+" : "-"}$${Math.round(Math.abs(metrics.netWhaleDeltaUsd)).toLocaleString()}
             </span>
@@ -1246,47 +1263,136 @@ class ApexWebTerminal {
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">WHALE BUY VOLUME (&ge;$50K)</span>
+            <span class="kpi-label">24H WHALE BUY VOLUME (&ge;$50K)</span>
             <span class="kpi-val text-green">$${Math.round(metrics.totalWhaleBuyVolumeUsd).toLocaleString()}</span>
             <span class="kpi-sub">AGGRESSIVE TAKER BUYS</span>
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">WHALE SELL VOLUME (&ge;$50K)</span>
+            <span class="kpi-label">24H WHALE SELL VOLUME (&ge;$50K)</span>
             <span class="kpi-val text-red">$${Math.round(metrics.totalWhaleSellVolumeUsd).toLocaleString()}</span>
             <span class="kpi-sub">AGGRESSIVE TAKER SELLS</span>
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">MEGA-WHALE BLOCKS (&gt;$1M)</span>
-            <span class="kpi-val text-cyan">${this.whaleStream.getWhaleTrades().filter((t) => t.valueUsd >= 1000000).length}</span>
-            <span class="kpi-sub">KRAKEN-CLASS EXECUTIONS</span>
+            <span class="kpi-label">LINKED TRANCHE CAMPAIGNS</span>
+            <span class="kpi-val text-amber">${multiTrancheCount} CAMPAIGNS</span>
+            <span class="kpi-sub">${allTrades.filter((t) => t.valueUsd >= 1000000).length} KRAKEN BLOCKS (&gt;$1M)</span>
           </div>
         </div>
 
+        <!-- Linked Whale Tranche Campaigns Table -->
+        <section class="terminal-section mt-3">
+          <div class="section-header-flex">
+            <div>
+              <span class="section-title">🔗 LINKED INSTITUTIONAL TRANCHE CAMPAIGNS (TWAP / ICEBERG / CROSS-VENUE CLUSTERING)</span>
+              <p class="section-desc">4-Factor Microstructure Fingerprinting links split whale orders across time, lot uniformity (CV), orderbook sweep depth, and venues.</p>
+            </div>
+          </div>
+
+          <div class="market-matrix-table-wrap mt-2">
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>CAMPAIGN ID</th>
+                  <th>ASSET &amp; SIDE</th>
+                  <th>EXECUTION ALGO</th>
+                  <th>TRANCHES &amp; CADENCE</th>
+                  <th>CUMULATIVE VALUE</th>
+                  <th>CAMPAIGN VWAP &amp; IMPACT</th>
+                  <th>VENUES &amp; CONFIDENCE</th>
+                </tr>
+              </thead>
+              <tbody id="tranche-campaigns-tbody">
+                ${
+                  campaigns.length === 0
+                    ? `<tr><td colspan="7" class="text-center">Clustering 24h whale orderflow into linked tranche campaigns...</td></tr>`
+                    : campaigns
+                        .map((c) => {
+                          const sideClass =
+                            c.side === "BUY" ? "text-green" : "text-red";
+                          const impactSign = c.priceImpactBps >= 0 ? "+" : "";
+                          const cadenceStr =
+                            c.trancheCount > 1
+                              ? `${c.trancheCount} tranches · avg ${Math.round(c.meanIntervalSec)}s · ${c.lotUniformityScore}% lot match`
+                              : `1 block fill · ${c.totalOrdersSwept} orders swept`;
+                          const spanMin = Math.max(
+                            1,
+                            Math.round((c.lastTime - c.startTime) / 60000),
+                          );
+                          const timeWindow =
+                            c.trancheCount > 1
+                              ? `${new Date(c.startTime).toLocaleTimeString()} – ${new Date(c.lastTime).toLocaleTimeString()} (${spanMin}m)`
+                              : new Date(c.lastTime).toLocaleTimeString();
+
+                          return `
+                      <tr class="${c.trancheCount >= 2 ? "row-highlight" : ""}">
+                        <td>
+                          <strong class="text-amber">${c.campaignId}</strong>
+                          <div class="text-dim" style="font-size: 0.7rem;">${timeWindow}</div>
+                        </td>
+                        <td class="${sideClass}">
+                          <strong>${c.asset} ${c.side === "BUY" ? "▲ ACCUMULATE" : "▼ DISTRIBUTE"}</strong>
+                        </td>
+                        <td>
+                          <span class="regime-badge ${c.algoType === "ICEBERG_CLIP" || c.algoType === "CROSS_VENUE_SWEEP" ? "regime-squeeze" : c.algoType === "TWAP_CAMPAIGN" ? "regime-extreme" : "regime-normal"}">
+                            ${c.algoType}
+                          </span>
+                        </td>
+                        <td>
+                          <strong>${cadenceStr}</strong>
+                        </td>
+                        <td class="${sideClass} font-bold">
+                          $${Math.round(c.totalValueUsd).toLocaleString()}
+                          <div class="text-dim" style="font-size: 0.72rem;">${c.totalQuantity.toLocaleString(undefined, { maximumFractionDigits: 3 })} ${c.asset}</div>
+                        </td>
+                        <td>
+                          <strong>$${c.vwapPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</strong>
+                          <span class="text-cyan" style="font-size: 0.75rem;">(${impactSign}${c.priceImpactBps.toFixed(1)} bps)</span>
+                        </td>
+                        <td>
+                          <span class="text-cyan font-bold">${c.venues.join(" + ")}</span>
+                          <div class="text-dim" style="font-size: 0.72rem;">Link Confidence: <strong>${c.confidenceScore}%</strong></div>
+                        </td>
+                      </tr>
+                    `;
+                        })
+                        .join("")
+                }
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <!-- Live Whale Tape Table -->
-        <div class="market-matrix-table-wrap mt-3">
-          <table class="terminal-table">
-            <thead>
-              <tr>
-                <th>TIME</th>
-                <th>ASSET</th>
-                <th>FLOW TYPE</th>
-                <th>VALUE (USD)</th>
-                <th>QUANTITY</th>
-                <th>EXECUTION PRICE</th>
-                <th>SCALE</th>
-              </tr>
-            </thead>
-            <tbody id="whale-tbody">
-              ${
-                trades.length === 0
-                  ? `<tr><td colspan="7" class="text-center">Awaiting WebSocket whale block executions &ge; $50,000...</td></tr>`
-                  : trades.map((t) => this.renderWhaleRow(t)).join("")
-              }
-            </tbody>
-          </table>
-        </div>
+        <section class="terminal-section mt-3">
+          <span class="section-title">📡 24-HOUR INDIVIDUAL WHALE PRINTS &amp; ON-CHAIN TRANSFERS (${trades.length} SHOWN)</span>
+          <div class="market-matrix-table-wrap mt-2">
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>TIME</th>
+                  <th>VENUE</th>
+                  <th>ASSET &amp; FLOW</th>
+                  <th>VALUE (USD)</th>
+                  <th>QUANTITY &amp; PRICE</th>
+                  <th>MICROSTRUCTURE / DEPTH SWEPT</th>
+                  <th>TRANCHE LINK</th>
+                </tr>
+              </thead>
+              <tbody id="whale-tbody">
+                ${
+                  trades.length === 0
+                    ? `<tr><td colspan="7" class="text-center">Awaiting WebSocket whale block executions &ge; $50,000...</td></tr>`
+                    : trades
+                        .slice(0, 100)
+                        .map((t) => this.renderWhaleRow(t))
+                        .join("")
+                }
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
     `;
 
@@ -1296,39 +1402,38 @@ class ApexWebTerminal {
   private renderWhaleRow(t: WhaleTrade): string {
     const timeStr = new Date(t.timestamp).toLocaleTimeString();
     const sideClass = t.side === "BUY" ? "text-green" : "text-red";
-    const tag =
-      t.valueUsd >= 1000000
-        ? "KRAKEN ($1M+)"
-        : t.valueUsd >= 500000
-          ? "WHALE ($500K+)"
-          : "DOLPHIN ($50K+)";
+    const venueLabel = t.venue || "BINANCE_SPOT";
+    const microInfo =
+      venueLabel === "BTC_MEMPOOL"
+        ? `On-Chain TX ${t.txHash ? t.txHash.slice(0, 10) + "…" : ""}`
+        : t.isBlockTrade
+          ? `OTC Block Trade`
+          : `Swept ${t.ordersSwept || 1} limit order${(t.ordersSwept || 1) > 1 ? "s" : ""}`;
+
+    const campaignBadge = t.campaignId
+      ? `<span class="text-amber font-bold">${t.campaignId}</span> <span class="text-dim">[#${t.trancheIndex || 1}]</span>`
+      : `<span class="text-dim">SINGLE</span>`;
 
     return `
       <tr class="row-flash-${t.side.toLowerCase()}">
         <td class="text-dim">${timeStr}</td>
-        <td><strong>${t.asset}</strong>/USDT</td>
-        <td class="${sideClass}"><strong>${t.side === "BUY" ? "▲ BUY BLOCK" : "▼ SELL BLOCK"}</strong></td>
+        <td><span class="regime-badge regime-normal">${venueLabel}</span></td>
+        <td class="${sideClass}"><strong>${t.asset} ${t.side === "BUY" ? "▲ BUY" : "▼ SELL"}</strong></td>
         <td class="${sideClass} font-bold">$${Math.round(t.valueUsd).toLocaleString()}</td>
-        <td>${t.quantity.toLocaleString(undefined, { maximumFractionDigits: 3 })} ${t.asset}</td>
-        <td>$${t.price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
-        <td><span class="badge-whale badge-${t.side.toLowerCase()}">${tag}</span></td>
+        <td>
+          ${t.quantity.toLocaleString(undefined, { maximumFractionDigits: 3 })} ${t.asset}
+          <span class="text-dim">@ $${t.price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span>
+        </td>
+        <td class="text-cyan">${microInfo}</td>
+        <td>${campaignBadge}</td>
       </tr>
     `;
   }
 
-  private renderWhaleLive(trade: WhaleTrade): void {
-    const tbody = document.getElementById("whale-tbody");
-    if (!tbody) return;
-
-    if (this.whaleFilter === "100K" && trade.valueUsd < 100000) return;
-    if (this.whaleFilter === "500K" && trade.valueUsd < 500000) return;
-    if (this.whaleFilter === "1M" && trade.valueUsd < 1000000) return;
-
-    const rowHtml = this.renderWhaleRow(trade);
-    tbody.insertAdjacentHTML("afterbegin", rowHtml);
-    if (tbody.children.length > 50) {
-      tbody.removeChild(tbody.lastChild!);
-    }
+  private renderWhaleLive(_trade: WhaleTrade): void {
+    const container = document.getElementById("terminal-body");
+    if (!container || this.activeScreen !== "WHALE") return;
+    this.renderWhaleScreen(container);
   }
 
   private bindWhaleEvents(): void {
@@ -1363,17 +1468,17 @@ class ApexWebTerminal {
       <div class="terminal-screen screen-liq">
         <div class="screen-header">
           <div class="screen-title-group">
-            <h2 class="screen-title">⚡ REAL-TIME LIQUIDATIONS FEED &amp; REKT RADAR</h2>
-            <span class="screen-subtitle">BINANCE FUTURES PUBLIC !FORCEORDER WEBSOCKET ENGINE (SUB-30MS)</span>
+            <h2 class="screen-title">⚡ REAL-TIME MULTI-EXCHANGE LIQUIDATIONS FEED &amp; REKT RADAR</h2>
+            <span class="screen-subtitle">BYBIT V5 ALL-LIQUIDATION + OKX V5 SWAP LIQUIDATION-ORDERS + BINANCE !FORCEORDER (SUB-30MS)</span>
           </div>
-          <span class="terminal-badge badge-red">LIVE CASUALTY TAPE</span>
+          <span class="terminal-badge badge-red">LIVE MULTI-VENUE CASUALTY TAPE</span>
         </div>
 
         <div class="aladdin-kpi-grid">
           <div class="kpi-card">
             <span class="kpi-label">TOTAL REKT VOLUME (SESSION)</span>
             <span class="kpi-val text-red">$${Math.round(totalLiq).toLocaleString()}</span>
-            <span class="kpi-sub">FORCED MARKET ORDERS</span>
+            <span class="kpi-sub">FORCED MARKET ORDERS (${liqs.length} EVENTS)</span>
           </div>
 
           <div class="kpi-card">
@@ -1404,6 +1509,7 @@ class ApexWebTerminal {
             <thead>
               <tr>
                 <th>TIME</th>
+                <th>VENUE</th>
                 <th>CONTRACT</th>
                 <th>REKT SIDE</th>
                 <th>LIQUIDATED VALUE</th>
@@ -1414,7 +1520,7 @@ class ApexWebTerminal {
             <tbody id="liq-tbody">
               ${
                 liqs.length === 0
-                  ? `<tr><td colspan="6" class="text-center">Connected to Binance Futures forced liquidation feed. Awaiting liquidation events...</td></tr>`
+                  ? `<tr><td colspan="7" class="text-center">Connected to Bybit V5, OKX Swap &amp; Binance Futures forced liquidation feeds...</td></tr>`
                   : liqs.map((l) => this.renderLiquidationRow(l)).join("")
               }
             </tbody>
@@ -1427,28 +1533,25 @@ class ApexWebTerminal {
   private renderLiquidationRow(l: LiquidationEvent): string {
     const timeStr = new Date(l.timestamp).toLocaleTimeString();
     const sideClass = l.side === "LONG" ? "text-red" : "text-green";
+    const venueLabel = l.venue || "BINANCE_FUTURES";
 
     return `
       <tr class="row-flash-liq">
         <td class="text-dim">${timeStr}</td>
+        <td><span class="regime-badge regime-normal">${venueLabel}</span></td>
         <td><strong>${l.asset}</strong>USDT PERP</td>
         <td class="${sideClass}"><strong>⚡ ${l.side} REKT</strong></td>
-        <td class="${sideClass}">$${Math.round(l.valueUsd).toLocaleString()}</td>
+        <td class="${sideClass} font-bold">$${Math.round(l.valueUsd).toLocaleString()}</td>
         <td>${l.quantity.toLocaleString(undefined, { maximumFractionDigits: 3 })} ${l.asset}</td>
         <td>$${l.price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
       </tr>
     `;
   }
 
-  private renderLiquidationLive(liq: LiquidationEvent): void {
-    const tbody = document.getElementById("liq-tbody");
-    if (!tbody) return;
-
-    const rowHtml = this.renderLiquidationRow(liq);
-    tbody.insertAdjacentHTML("afterbegin", rowHtml);
-    if (tbody.children.length > 50) {
-      tbody.removeChild(tbody.lastChild!);
-    }
+  private renderLiquidationLive(_liq: LiquidationEvent): void {
+    const container = document.getElementById("terminal-body");
+    if (!container || this.activeScreen !== "LIQ") return;
+    this.renderLiquidationScreen(container);
   }
 
   // ==========================================

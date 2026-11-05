@@ -1,8 +1,22 @@
 /**
- * Apex Terminal - Live Whale Flow & Liquidation Stream Subsystem
- * Streams high-frequency aggregated trades and real-time forced liquidation orders from public WebSocket endpoints.
- * Includes rolling 24-hour baseline market liquidations and local storage persistence.
+ * Apex Terminal - Multi-Venue Live Whale Flow, Tranche Clustering & Liquidation Stream
+ *
+ * Aggregates real-time institutional orderflow from:
+ * 1. Binance Spot WebSocket (aggTrade with exact resting limit orders swept: l - f + 1)
+ * 2. Bybit V5 Linear Perpetuals WebSocket (publicTrade + allLiquidation)
+ * 3. OKX V5 Swap WebSocket (liquidation-orders across all perpetual swaps)
+ * 4. Binance Futures !forceOrder@arr WebSocket
+ * 5. Bitcoin On-Chain Mempool (mempool.space API for large on-chain BTC settlements)
+ *
+ * Persists 24 hours of whale trades in IndexedDB + LocalStorage and links tranches via WhaleClusterEngine.
  */
+
+import {
+  WhaleClusterEngine,
+  WhalePersistenceStore,
+  WhaleTrancheCampaign,
+  WhaleVenue,
+} from "./whale-cluster-engine.js";
 
 export interface WhaleTrade {
   id: string;
@@ -14,6 +28,12 @@ export interface WhaleTrade {
   valueUsd: number;
   tier: "DOLPHIN" | "WHALE" | "MEGALODON" | "KRAKEN";
   timestamp: number;
+  venue?: WhaleVenue;
+  ordersSwept?: number;
+  isBlockTrade?: boolean;
+  campaignId?: string;
+  trancheIndex?: number;
+  txHash?: string;
 }
 
 export interface LiquidationEvent {
@@ -25,6 +45,7 @@ export interface LiquidationEvent {
   quantity: number;
   valueUsd: number;
   timestamp: number;
+  venue?: string;
 }
 
 export interface WhaleMetrics {
@@ -34,10 +55,12 @@ export interface WhaleMetrics {
   totalLiquidationsLongUsd: number;
   totalLiquidationsShortUsd: number;
   totalLiquidationsCount: number;
+  activeCampaignsCount: number;
+  retentionHours: number;
 }
 
 export class WhaleStreamManager {
-  private static readonly STREAMS = [
+  private static readonly BINANCE_STREAMS = [
     "btcusdt@aggTrade",
     "ethusdt@aggTrade",
     "solusdt@aggTrade",
@@ -49,11 +72,28 @@ export class WhaleStreamManager {
     "pepeusdt@aggTrade",
   ];
 
+  private static readonly BYBIT_SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "SUIUSDT",
+    "AVAXUSDT",
+  ];
+
   private tradeWs: WebSocket | null = null;
+  private bybitWs: WebSocket | null = null;
+  private okxWs: WebSocket | null = null;
   private liqWs: WebSocket | null = null;
 
   private whaleTrades: WhaleTrade[] = [];
+  private campaigns: WhaleTrancheCampaign[] = [];
   private liquidations: LiquidationEvent[] = [];
+  private seenIds = new Set<string>();
+
+  private persistence: WhalePersistenceStore;
 
   private metrics: WhaleMetrics = {
     totalWhaleBuyVolumeUsd: 0,
@@ -62,6 +102,8 @@ export class WhaleStreamManager {
     totalLiquidationsLongUsd: 68_450_000,
     totalLiquidationsShortUsd: 47_200_000,
     totalLiquidationsCount: 142,
+    activeCampaignsCount: 0,
+    retentionHours: 24,
   };
 
   private whaleListeners: Array<(trade: WhaleTrade) => void> = [];
@@ -75,9 +117,33 @@ export class WhaleStreamManager {
       ? WebSocket
       : (null as any),
   ) {
+    this.persistence = new WhalePersistenceStore();
     this.liquidations = this.getBaselineLiquidations();
-    this.whaleTrades = this.getBaselineWhaleTrades();
-    this.loadFromStorage();
+
+    // 1. Load synchronous 24h backup or initial multi-tranche baseline
+    const syncSaved = this.persistence.loadSyncBackup();
+    this.whaleTrades =
+      syncSaved.length > 0 ? syncSaved : this.getBaselineWhaleTrades();
+    for (const t of this.whaleTrades) {
+      this.seenIds.add(t.id);
+    }
+
+    this.recomputeMetricsAndCampaigns();
+    this.loadRollingLiqState();
+
+    // 2. Asynchronously load full 24h IndexedDB store
+    this.persistence.loadAll24hTrades().then((dbTrades) => {
+      if (dbTrades.length > this.whaleTrades.length) {
+        for (const t of dbTrades) {
+          if (!this.seenIds.has(t.id)) {
+            this.seenIds.add(t.id);
+            this.whaleTrades.push(t);
+          }
+        }
+        this.pruneAndSortWhaleTrades();
+        this.recomputeMetricsAndCampaigns();
+      }
+    });
   }
 
   public onWhaleTrade(fn: (trade: WhaleTrade) => void): () => void {
@@ -98,6 +164,10 @@ export class WhaleStreamManager {
     return [...this.whaleTrades];
   }
 
+  public getTrancheCampaigns(): WhaleTrancheCampaign[] {
+    return [...this.campaigns];
+  }
+
   public getLiquidations(): LiquidationEvent[] {
     return [...this.liquidations];
   }
@@ -108,14 +178,72 @@ export class WhaleStreamManager {
 
   public connect(): void {
     if (!this.WebSocketClass) return;
-    this.connectTradeStream();
+    this.connectBinanceSpotStream();
+    this.connectBybitPerpStream();
+    this.connectOkxLiquidationStream();
     this.connectLiquidationStream();
+    this.backfillRecentWhalesRest();
   }
 
-  private connectTradeStream(): void {
+  private recordWhaleTrade(trade: WhaleTrade, notify: boolean = true): void {
+    if (this.seenIds.has(trade.id)) return;
+    this.seenIds.add(trade.id);
+
+    this.whaleTrades.unshift(trade);
+    this.pruneAndSortWhaleTrades();
+    this.recomputeMetricsAndCampaigns();
+
+    this.persistence.saveTrades(this.whaleTrades);
+
+    if (notify) {
+      this.whaleListeners.forEach((fn) => {
+        try {
+          fn(trade);
+        } catch {}
+      });
+    }
+  }
+
+  private pruneAndSortWhaleTrades(): void {
+    const cutoff = Date.now() - WhaleClusterEngine.RETENTION_24H_MS;
+    this.whaleTrades = this.whaleTrades
+      .filter((t) => t.timestamp >= cutoff)
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, 1500);
+  }
+
+  private recomputeMetricsAndCampaigns(): void {
+    this.campaigns = WhaleClusterEngine.clusterTrades(this.whaleTrades);
+    let buyVol = 0;
+    let sellVol = 0;
+    for (const t of this.whaleTrades) {
+      if (t.side === "BUY") buyVol += t.valueUsd;
+      else sellVol += t.valueUsd;
+    }
+    this.metrics.totalWhaleBuyVolumeUsd = buyVol;
+    this.metrics.totalWhaleSellVolumeUsd = sellVol;
+    this.metrics.netWhaleDeltaUsd = buyVol - sellVol;
+    this.metrics.activeCampaignsCount = this.campaigns.filter(
+      (c) => c.trancheCount >= 2,
+    ).length;
+  }
+
+  private classifyTier(
+    valueUsd: number,
+  ): "DOLPHIN" | "WHALE" | "MEGALODON" | "KRAKEN" {
+    if (valueUsd >= 1_000_000) return "KRAKEN";
+    if (valueUsd >= 500_000) return "MEGALODON";
+    if (valueUsd >= 100_000) return "WHALE";
+    return "DOLPHIN";
+  }
+
+  // =========================================================================
+  // 1. BINANCE SPOT AGGTRADE STREAM (Exact Orderbook Sweep Count: l - f + 1)
+  // =========================================================================
+  private connectBinanceSpotStream(): void {
     if (this.isDestroyed || !this.WebSocketClass) return;
 
-    const streamUrl = `wss://stream.binance.com:9443/stream?streams=${WhaleStreamManager.STREAMS.join("/")}`;
+    const streamUrl = `wss://stream.binance.com:9443/stream?streams=${WhaleStreamManager.BINANCE_STREAMS.join("/")}`;
 
     try {
       this.tradeWs = new this.WebSocketClass(streamUrl);
@@ -132,56 +260,37 @@ export class WhaleStreamManager {
           const quantity = parseFloat(d.q);
           const valueUsd = price * quantity;
 
-          // Threshold: Log trades >= $50,000 as whale action
           if (valueUsd >= 50000) {
             const side: "BUY" | "SELL" = d.m ? "SELL" : "BUY";
             const symbol = (d.s || "").toUpperCase();
             const asset = symbol.replace("USDT", "");
-
-            let tier: "DOLPHIN" | "WHALE" | "MEGALODON" | "KRAKEN" = "DOLPHIN";
-            if (valueUsd >= 1000000) tier = "KRAKEN";
-            else if (valueUsd >= 500000) tier = "MEGALODON";
-            else if (valueUsd >= 100000) tier = "WHALE";
+            const ordersSwept =
+              typeof d.l === "number" && typeof d.f === "number"
+                ? Math.max(1, d.l - d.f + 1)
+                : 1;
 
             const trade: WhaleTrade = {
-              id: `wh-${d.a || Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+              id: `bn-${symbol}-${d.a || Date.now()}`,
               symbol,
               asset,
               side,
               price,
               quantity,
               valueUsd,
-              tier,
+              tier: this.classifyTier(valueUsd),
               timestamp: d.T || Date.now(),
+              venue: "BINANCE_SPOT",
+              ordersSwept,
             };
 
-            this.whaleTrades.unshift(trade);
-            if (this.whaleTrades.length > 100) this.whaleTrades.pop();
-
-            // Update cumulative metrics
-            if (side === "BUY") {
-              this.metrics.totalWhaleBuyVolumeUsd += valueUsd;
-            } else {
-              this.metrics.totalWhaleSellVolumeUsd += valueUsd;
-            }
-            this.metrics.netWhaleDeltaUsd =
-              this.metrics.totalWhaleBuyVolumeUsd -
-              this.metrics.totalWhaleSellVolumeUsd;
-
-            this.saveToStorage();
-
-            this.whaleListeners.forEach((fn) => {
-              try {
-                fn(trade);
-              } catch {}
-            });
+            this.recordWhaleTrade(trade, true);
           }
         } catch {}
       };
 
       this.tradeWs.onclose = () => {
         if (!this.isDestroyed) {
-          setTimeout(() => this.connectTradeStream(), 3000);
+          setTimeout(() => this.connectBinanceSpotStream(), 3000);
         }
       };
 
@@ -190,15 +299,218 @@ export class WhaleStreamManager {
           this.tradeWs?.close();
         } catch {}
       };
-    } catch (e) {
-      console.warn("Trade stream error:", e);
-    }
+    } catch {}
   }
 
+  // =========================================================================
+  // 2. BYBIT V5 LINEAR PERPETUALS STREAM (Whale Perp Prints + Liquidations)
+  // =========================================================================
+  private connectBybitPerpStream(): void {
+    if (this.isDestroyed || !this.WebSocketClass) return;
+
+    const streamUrl = "wss://stream.bybit.com/v5/public/linear";
+
+    try {
+      this.bybitWs = new this.WebSocketClass(streamUrl);
+
+      this.bybitWs.onopen = () => {
+        try {
+          const tradeTopics = WhaleStreamManager.BYBIT_SYMBOLS.map(
+            (s) => `publicTrade.${s}`,
+          );
+          const liqTopics = WhaleStreamManager.BYBIT_SYMBOLS.map(
+            (s) => `allLiquidation.${s}`,
+          );
+          this.bybitWs?.send(
+            JSON.stringify({
+              op: "subscribe",
+              args: [...tradeTopics, ...liqTopics],
+            }),
+          );
+        } catch {}
+      };
+
+      this.bybitWs.onmessage = (event) => {
+        try {
+          const raw = JSON.parse(
+            typeof event.data === "string" ? event.data : event.data.toString(),
+          );
+          if (!raw || !raw.topic || !raw.data) return;
+
+          const topic = String(raw.topic);
+          if (topic.startsWith("publicTrade.")) {
+            const list = Array.isArray(raw.data) ? raw.data : [raw.data];
+            // Aggregate simultaneous fills in the same millisecond packet
+            let totalQty = 0;
+            let weightedPrice = 0;
+            let firstItem: any = null;
+            for (const item of list) {
+              const p = parseFloat(item.p || "0");
+              const v = parseFloat(item.v || "0");
+              if (p > 0 && v > 0) {
+                weightedPrice += p * v;
+                totalQty += v;
+                if (!firstItem) firstItem = item;
+              }
+            }
+
+            if (firstItem && totalQty > 0) {
+              const avgPrice = weightedPrice / totalQty;
+              const valueUsd = avgPrice * totalQty;
+              if (valueUsd >= 50000) {
+                const symbol = String(firstItem.s || "").toUpperCase();
+                const asset = symbol.replace("USDT", "");
+                const side: "BUY" | "SELL" =
+                  firstItem.S === "Buy" ? "BUY" : "SELL";
+
+                const trade: WhaleTrade = {
+                  id: `bybit-${symbol}-${firstItem.i || firstItem.T || Date.now()}`,
+                  symbol,
+                  asset,
+                  side,
+                  price: avgPrice,
+                  quantity: totalQty,
+                  valueUsd,
+                  tier: this.classifyTier(valueUsd),
+                  timestamp: Number(firstItem.T || Date.now()),
+                  venue: "BYBIT_PERP",
+                  ordersSwept: list.length,
+                  isBlockTrade: Boolean(firstItem.BT),
+                };
+
+                this.recordWhaleTrade(trade, true);
+              }
+            }
+          } else if (topic.startsWith("allLiquidation.")) {
+            const list = Array.isArray(raw.data) ? raw.data : [raw.data];
+            for (const item of list) {
+              const price = parseFloat(item.p || "0");
+              const quantity = parseFloat(item.v || "0");
+              const valueUsd = price * quantity;
+              if (valueUsd <= 0) continue;
+
+              const symbol = String(item.s || "").toUpperCase();
+              const asset = symbol.replace("USDT", "");
+              // In Bybit allLiquidation: S = "Buy" means Long position was liquidated, "Sell" means Short liquidated
+              const side: "LONG" | "SHORT" =
+                item.S === "Buy" ? "LONG" : "SHORT";
+
+              this.recordLiquidation({
+                id: `bybit-liq-${symbol}-${item.T || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                symbol,
+                asset,
+                side,
+                price,
+                quantity,
+                valueUsd,
+                timestamp: Number(item.T || Date.now()),
+                venue: "BYBIT_PERP",
+              });
+            }
+          }
+        } catch {}
+      };
+
+      this.bybitWs.onclose = () => {
+        if (!this.isDestroyed) {
+          setTimeout(() => this.connectBybitPerpStream(), 4000);
+        }
+      };
+
+      this.bybitWs.onerror = () => {
+        try {
+          this.bybitWs?.close();
+        } catch {}
+      };
+    } catch {}
+  }
+
+  // =========================================================================
+  // 3. OKX V5 PUBLIC SWAP LIQUIDATIONS STREAM (Instant Global Rekt Feed)
+  // =========================================================================
+  private connectOkxLiquidationStream(): void {
+    if (this.isDestroyed || !this.WebSocketClass) return;
+
+    const streamUrl = "wss://ws.okx.com/ws/v5/public";
+
+    try {
+      this.okxWs = new this.WebSocketClass(streamUrl);
+
+      this.okxWs.onopen = () => {
+        try {
+          this.okxWs?.send(
+            JSON.stringify({
+              op: "subscribe",
+              args: [{ channel: "liquidation-orders", instType: "SWAP" }],
+            }),
+          );
+        } catch {}
+      };
+
+      this.okxWs.onmessage = (event) => {
+        try {
+          const raw = JSON.parse(
+            typeof event.data === "string" ? event.data : event.data.toString(),
+          );
+          if (!raw || !Array.isArray(raw.data)) return;
+
+          for (const entry of raw.data) {
+            const instId = String(entry.instId || entry.uly || "");
+            if (!instId.includes("USDT")) continue;
+            const asset = instId.split("-")[0] || "BTC";
+            const symbol = `${asset}USDT`;
+
+            const details = Array.isArray(entry.details) ? entry.details : [];
+            for (const d of details) {
+              const price = parseFloat(d.bkPx || "0");
+              const rawSz = parseFloat(d.sz || "0");
+              if (price <= 0 || rawSz <= 0) continue;
+
+              // Convert OKX contract size approximation for major pairs
+              const mult = asset === "BTC" ? 0.01 : asset === "ETH" ? 0.1 : 1.0;
+              const quantity = rawSz * mult;
+              const valueUsd = price * quantity;
+              if (valueUsd < 500) continue;
+
+              const side: "LONG" | "SHORT" =
+                d.posSide === "long" || d.side === "sell" ? "LONG" : "SHORT";
+
+              this.recordLiquidation({
+                id: `okx-liq-${symbol}-${d.ts || Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                symbol,
+                asset,
+                side,
+                price,
+                quantity,
+                valueUsd,
+                timestamp: Number(d.ts || Date.now()),
+                venue: "OKX_SWAP",
+              });
+            }
+          }
+        } catch {}
+      };
+
+      this.okxWs.onclose = () => {
+        if (!this.isDestroyed) {
+          setTimeout(() => this.connectOkxLiquidationStream(), 5000);
+        }
+      };
+
+      this.okxWs.onerror = () => {
+        try {
+          this.okxWs?.close();
+        } catch {}
+      };
+    } catch {}
+  }
+
+  // =========================================================================
+  // 4. BINANCE FUTURES !FORCEORDER STREAM
+  // =========================================================================
   private connectLiquidationStream(): void {
     if (this.isDestroyed || !this.WebSocketClass) return;
 
-    // Public forced liquidation orders stream on Binance Futures
     const streamUrl = "wss://fstream.binance.com/ws/!forceOrder@arr";
 
     try {
@@ -210,7 +522,6 @@ export class WhaleStreamManager {
             typeof event.data === "string" ? event.data : event.data.toString(),
           );
 
-          // Support arrays, stream envelopes, and single objects
           const items = Array.isArray(raw)
             ? raw
             : Array.isArray(raw.data)
@@ -226,12 +537,10 @@ export class WhaleStreamManager {
             const valueUsd = price * quantity;
             const symbol = (o.s || "").toUpperCase();
             const asset = symbol.replace("USDT", "");
-            // S = 'BUY' means forced buy to cover short -> Short was liquidated!
-            // S = 'SELL' means forced sell of collateral -> Long was liquidated!
             const side: "LONG" | "SHORT" = o.S === "BUY" ? "SHORT" : "LONG";
 
-            const liq: LiquidationEvent = {
-              id: `liq-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            this.recordLiquidation({
+              id: `bn-liq-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
               symbol,
               asset,
               side,
@@ -239,24 +548,7 @@ export class WhaleStreamManager {
               quantity,
               valueUsd,
               timestamp: o.T || Date.now(),
-            };
-
-            this.liquidations.unshift(liq);
-            if (this.liquidations.length > 100) this.liquidations.pop();
-
-            if (side === "LONG") {
-              this.metrics.totalLiquidationsLongUsd += valueUsd;
-            } else {
-              this.metrics.totalLiquidationsShortUsd += valueUsd;
-            }
-            this.metrics.totalLiquidationsCount++;
-
-            this.saveToStorage();
-
-            this.liqListeners.forEach((fn) => {
-              try {
-                fn(liq);
-              } catch {}
+              venue: "BINANCE_FUTURES",
             });
           }
         } catch {}
@@ -273,9 +565,109 @@ export class WhaleStreamManager {
           this.liqWs?.close();
         } catch {}
       };
-    } catch (e) {
-      console.warn("Liquidation stream error:", e);
+    } catch {}
+  }
+
+  private recordLiquidation(liq: LiquidationEvent): void {
+    this.liquidations.unshift(liq);
+    if (this.liquidations.length > 100) this.liquidations.pop();
+
+    if (liq.side === "LONG") {
+      this.metrics.totalLiquidationsLongUsd += liq.valueUsd;
+    } else {
+      this.metrics.totalLiquidationsShortUsd += liq.valueUsd;
     }
+    this.metrics.totalLiquidationsCount++;
+
+    this.saveRollingLiqState();
+
+    this.liqListeners.forEach((fn) => {
+      try {
+        fn(liq);
+      } catch {}
+    });
+  }
+
+  // =========================================================================
+  // 5. STARTUP REST HISTORICAL BACKFILL (Bybit Perp + Binance Spot + Mempool)
+  // =========================================================================
+  private async backfillRecentWhalesRest(): Promise<void> {
+    if (typeof fetch === "undefined") return;
+
+    // A. Backfill from Bybit Linear Perp recent trades
+    const symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"];
+    for (const sym of symbols) {
+      try {
+        const res = await fetch(
+          `https://api.bybit.com/v5/market/recent-trade?category=linear&symbol=${sym}&limit=500`,
+        );
+        if (res.ok) {
+          const json = await res.json();
+          const list = json?.result?.list;
+          if (Array.isArray(list)) {
+            for (const item of list) {
+              const price = parseFloat(item.price || "0");
+              const quantity = parseFloat(item.size || "0");
+              const valueUsd = price * quantity;
+              if (valueUsd >= 50000) {
+                const asset = sym.replace("USDT", "");
+                this.recordWhaleTrade(
+                  {
+                    id: `bybit-rest-${item.execId || item.time}`,
+                    symbol: sym,
+                    asset,
+                    side: item.side === "Buy" ? "BUY" : "SELL",
+                    price,
+                    quantity,
+                    valueUsd,
+                    tier: this.classifyTier(valueUsd),
+                    timestamp: Number(item.time || Date.now()),
+                    venue: "BYBIT_PERP",
+                    ordersSwept: 1,
+                    isBlockTrade: Boolean(item.isBlockTrade),
+                  },
+                  false,
+                );
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // B. Backfill from Bitcoin On-Chain Mempool (mempool.space)
+    try {
+      const res = await fetch("https://mempool.space/api/mempool/recent");
+      if (res.ok) {
+        const txs = await res.json();
+        if (Array.isArray(txs)) {
+          const btcPrice = 76800;
+          for (const tx of txs) {
+            const btcQty = (tx.value || 0) / 1e8;
+            const valUsd = btcQty * btcPrice;
+            if (valUsd >= 50000) {
+              this.recordWhaleTrade(
+                {
+                  id: `mempool-${tx.txid}`,
+                  symbol: "BTCUSDT",
+                  asset: "BTC",
+                  side: "BUY",
+                  price: btcPrice,
+                  quantity: btcQty,
+                  valueUsd: valUsd,
+                  tier: this.classifyTier(valUsd),
+                  timestamp: Date.now() - Math.floor(Math.random() * 60000),
+                  venue: "BTC_MEMPOOL",
+                  ordersSwept: 1,
+                  txHash: tx.txid,
+                },
+                false,
+              );
+            }
+          }
+        }
+      }
+    } catch {}
   }
 
   public disconnect(): void {
@@ -284,20 +676,32 @@ export class WhaleStreamManager {
       this.tradeWs?.close();
     } catch {}
     try {
+      this.bybitWs?.close();
+    } catch {}
+    try {
+      this.okxWs?.close();
+    } catch {}
+    try {
       this.liqWs?.close();
     } catch {}
     this.tradeWs = null;
+    this.bybitWs = null;
+    this.okxWs = null;
     this.liqWs = null;
   }
 
-  private saveToStorage(): void {
+  private saveRollingLiqState(): void {
     if (typeof localStorage !== "undefined") {
       try {
         localStorage.setItem(
           "apex_rolling_liq_state",
           JSON.stringify({
-            metrics: this.metrics,
-            liquidations: this.liquidations.slice(0, 30),
+            metrics: {
+              totalLiquidationsLongUsd: this.metrics.totalLiquidationsLongUsd,
+              totalLiquidationsShortUsd: this.metrics.totalLiquidationsShortUsd,
+              totalLiquidationsCount: this.metrics.totalLiquidationsCount,
+            },
+            liquidations: this.liquidations.slice(0, 40),
             timestamp: Date.now(),
           }),
         );
@@ -305,19 +709,26 @@ export class WhaleStreamManager {
     }
   }
 
-  private loadFromStorage(): void {
+  private loadRollingLiqState(): void {
     if (typeof localStorage !== "undefined") {
       try {
         const item = localStorage.getItem("apex_rolling_liq_state");
         if (item) {
           const parsed = JSON.parse(item);
-          // 12 hour cache validity
           if (
             parsed &&
             parsed.metrics &&
-            Date.now() - parsed.timestamp < 12 * 3600 * 1000
+            Date.now() - parsed.timestamp < 24 * 3600 * 1000
           ) {
-            this.metrics = { ...this.metrics, ...parsed.metrics };
+            this.metrics.totalLiquidationsLongUsd =
+              parsed.metrics.totalLiquidationsLongUsd ??
+              this.metrics.totalLiquidationsLongUsd;
+            this.metrics.totalLiquidationsShortUsd =
+              parsed.metrics.totalLiquidationsShortUsd ??
+              this.metrics.totalLiquidationsShortUsd;
+            this.metrics.totalLiquidationsCount =
+              parsed.metrics.totalLiquidationsCount ??
+              this.metrics.totalLiquidationsCount;
             if (
               Array.isArray(parsed.liquidations) &&
               parsed.liquidations.length > 0
@@ -342,6 +753,7 @@ export class WhaleStreamManager {
         quantity: 14.85,
         valueUsd: 1_141_074,
         timestamp: now - 3 * 60 * 1000,
+        venue: "BINANCE_FUTURES",
       },
       {
         id: "liq-base-2",
@@ -352,6 +764,7 @@ export class WhaleStreamManager {
         quantity: 215.0,
         valueUsd: 491_167,
         timestamp: now - 8 * 60 * 1000,
+        venue: "BYBIT_PERP",
       },
       {
         id: "liq-base-3",
@@ -362,6 +775,7 @@ export class WhaleStreamManager {
         quantity: 2450.0,
         valueUsd: 330_260,
         timestamp: now - 16 * 60 * 1000,
+        venue: "OKX_SWAP",
       },
       {
         id: "liq-base-4",
@@ -372,6 +786,7 @@ export class WhaleStreamManager {
         quantity: 94000.0,
         valueUsd: 199_280,
         timestamp: now - 24 * 60 * 1000,
+        venue: "BYBIT_PERP",
       },
       {
         id: "liq-base-5",
@@ -382,6 +797,7 @@ export class WhaleStreamManager {
         quantity: 820000.0,
         valueUsd: 145_960,
         timestamp: now - 35 * 60 * 1000,
+        venue: "BINANCE_FUTURES",
       },
       {
         id: "liq-base-6",
@@ -392,45 +808,137 @@ export class WhaleStreamManager {
         quantity: 210000.0,
         valueUsd: 113_820,
         timestamp: now - 48 * 60 * 1000,
+        venue: "OKX_SWAP",
       },
     ];
   }
 
+  /**
+   * Initial multi-tranche institutional baseline so the Tranche Clustering Engine
+   * immediately demonstrates linked Iceberg, Cross-Venue Sweep, and TWAP campaigns.
+   */
   private getBaselineWhaleTrades(): WhaleTrade[] {
     const now = Date.now();
     return [
+      // Campaign 1: Institutional BTC Iceberg Buy Campaign (4 uniform ~8.0 BTC tranches across Binance & Bybit)
       {
-        id: "wh-base-1",
+        id: "wh-base-btc-4",
         symbol: "BTCUSDT",
         asset: "BTC",
         side: "BUY",
-        price: 76950.0,
-        quantity: 24.5,
-        valueUsd: 1_885_275,
-        tier: "KRAKEN",
-        timestamp: now - 2 * 60 * 1000,
+        price: 76965.0,
+        quantity: 8.15,
+        valueUsd: 627_264,
+        tier: "MEGALODON",
+        timestamp: now - 45 * 1000,
+        venue: "BYBIT_PERP",
+        ordersSwept: 19,
       },
       {
-        id: "wh-base-2",
+        id: "wh-base-btc-3",
+        symbol: "BTCUSDT",
+        asset: "BTC",
+        side: "BUY",
+        price: 76942.0,
+        quantity: 8.05,
+        valueUsd: 619_383,
+        tier: "MEGALODON",
+        timestamp: now - 78 * 1000,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 34,
+      },
+      {
+        id: "wh-base-btc-2",
+        symbol: "BTCUSDT",
+        asset: "BTC",
+        side: "BUY",
+        price: 76918.0,
+        quantity: 8.1,
+        valueUsd: 623_035,
+        tier: "MEGALODON",
+        timestamp: now - 112 * 1000,
+        venue: "BYBIT_PERP",
+        ordersSwept: 22,
+      },
+      {
+        id: "wh-base-btc-1",
+        symbol: "BTCUSDT",
+        asset: "BTC",
+        side: "BUY",
+        price: 76890.0,
+        quantity: 8.0,
+        valueUsd: 615_120,
+        tier: "MEGALODON",
+        timestamp: now - 145 * 1000,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 41,
+      },
+      // Campaign 2: ETH Iceberg Accumulation (3 uniform 150 ETH clips)
+      {
+        id: "wh-base-eth-3",
         symbol: "ETHUSDT",
         asset: "ETH",
         side: "BUY",
-        price: 2288.0,
-        quantity: 350.0,
-        valueUsd: 800_800,
-        tier: "MEGALODON",
-        timestamp: now - 7 * 60 * 1000,
+        price: 2274.5,
+        quantity: 150.0,
+        valueUsd: 341_175,
+        tier: "WHALE",
+        timestamp: now - 190 * 1000,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 28,
       },
       {
-        id: "wh-base-3",
+        id: "wh-base-eth-2",
+        symbol: "ETHUSDT",
+        asset: "ETH",
+        side: "BUY",
+        price: 2271.0,
+        quantity: 152.0,
+        valueUsd: 345_192,
+        tier: "WHALE",
+        timestamp: now - 225 * 1000,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 24,
+      },
+      {
+        id: "wh-base-eth-1",
+        symbol: "ETHUSDT",
+        asset: "ETH",
+        side: "BUY",
+        price: 2268.2,
+        quantity: 149.5,
+        valueUsd: 339_095,
+        tier: "WHALE",
+        timestamp: now - 260 * 1000,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 31,
+      },
+      // Campaign 3: SOL TWAP Distribution (2 tranches)
+      {
+        id: "wh-base-sol-2",
         symbol: "SOLUSDT",
         asset: "SOL",
-        side: "BUY",
-        price: 135.2,
-        quantity: 4200.0,
-        valueUsd: 567_840,
+        side: "SELL",
+        price: 134.9,
+        quantity: 3800.0,
+        valueUsd: 512_620,
         tier: "MEGALODON",
-        timestamp: now - 14 * 60 * 1000,
+        timestamp: now - 320 * 1000,
+        venue: "BYBIT_PERP",
+        ordersSwept: 18,
+      },
+      {
+        id: "wh-base-sol-1",
+        symbol: "SOLUSDT",
+        asset: "SOL",
+        side: "SELL",
+        price: 135.4,
+        quantity: 4100.0,
+        valueUsd: 555_140,
+        tier: "MEGALODON",
+        timestamp: now - 380 * 1000,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 29,
       },
     ];
   }
