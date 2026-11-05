@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#040608" />
+    <meta
+      name="description"
+      content="APEX TERMINAL — Institutional Bloomberg Terminal & BlackRock Aladdin Engine for Digital Assets & Crypto."
+    />
+    <link rel="manifest" href="./manifest.json" />
+    <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+    <link rel="apple-touch-icon" href="./icon.svg" />
+    <title>APEX // TERMINAL · Bloomberg × BlackRock Aladdin for Crypto</title>
+
+    <style>
+      :root {
+        --crt-bg: #040608;
+        --crt-surface: #0a0e14;
+        --crt-elevated: #111722;
+        --crt-border: #1a2332;
+        --crt-border-bright: #2d3b52;
+
+        --amber: #ff9900;
+        --amber-glow: rgba(255, 153, 0, 0.25);
+        --cyan: #00d8ff;
+        --cyan-glow: rgba(0, 216, 255, 0.25);
+        --green: #00ff66;
+        --green-glow: rgba(0, 255, 102, 0.25);
+        --red: #ff3344;
+        --red-glow: rgba(255, 51, 68, 0.25);
+
+        --text-main: #e2e8f0;
+        --text-muted: #8892b0;
+        --text-dim: #4a5568;
+
+        --font-mono:
+          "JetBrains Mono", "SF Mono", Consolas, Monaco, "Courier New",
+          monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        user-select: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      body {
+        background-color: var(--crt-bg);
+        color: var(--text-main);
+        font-family: var(--font-mono);
+        font-size: 13px;
+        line-height: 1.4;
+        min-height: 100vh;
+        overflow-x: hidden;
+      }
+
+      /* Scanline effect */
+      body::before {
+        content: " ";
+        display: block;
+        position: fixed;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        right: 0;
+        background:
+          linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%),
+          linear-gradient(
+            90deg,
+            rgba(255, 0, 0, 0.03),
+            rgba(0, 255, 0, 0.01),
+            rgba(0, 0, 255, 0.03)
+          );
+        z-index: 999;
+        background-size:
+          100% 2px,
+          3px 100%;
+        pointer-events: none;
+        opacity: 0.6;
+      }
+
+      .terminal-container {
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
+      }
+
+      /* Bloomberg Header */
+      .terminal-header {
+        background: #020305;
+        border-bottom: 2px solid var(--amber);
+        padding: 8px 16px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        position: sticky;
+        top: 0;
+        z-index: 50;
+      }
+
+      .header-left {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .terminal-brand {
+        color: var(--amber);
+        font-size: 1.1rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-shadow: 0 0 10px var(--amber-glow);
+      }
+
+      .terminal-tag {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        letter-spacing: 0.06em;
+        border-left: 1px solid var(--crt-border);
+        padding-left: 12px;
+      }
+
+      .system-time {
+        font-size: 0.8rem;
+        color: var(--cyan);
+        font-weight: 700;
+      }
+
+      .header-right {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .feed-status {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        padding: 4px 10px;
+        border-radius: 4px;
+        background: var(--crt-surface);
+        border: 1px solid var(--crt-border);
+      }
+
+      .status-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: 0 0 8px var(--green);
+        animation: pulse 1.5s infinite;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.4;
+        }
+      }
+
+      .status-connected {
+        color: var(--green);
+        border-color: var(--green);
+      }
+      .status-connecting {
+        color: var(--amber);
+        border-color: var(--amber);
+      }
+      .status-reconnecting {
+        color: var(--red);
+        border-color: var(--red);
+      }
+
+      .terminal-btn-sm {
+        background: var(--crt-surface);
+        border: 1px solid var(--crt-border-bright);
+        color: var(--text-main);
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        font-weight: 700;
+        padding: 4px 10px;
+        cursor: pointer;
+        border-radius: 4px;
+        transition: all 0.15s ease;
+      }
+
+      .terminal-btn-sm:hover {
+        border-color: var(--amber);
+        color: var(--amber);
+      }
+
+      /* Ticker Tape */
+      .ticker-tape-container {
+        background: #06090f;
+        border-bottom: 1px solid var(--crt-border);
+        overflow-x: auto;
+        white-space: nowrap;
+        padding: 6px 12px;
+        scrollbar-width: none;
+      }
+
+      .ticker-tape-container::-webkit-scrollbar {
+        display: none;
+      }
+
+      .ticker-tape {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        font-size: 0.8rem;
+      }
+
+      .tape-tick {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .tape-sep {
+        color: var(--crt-border-bright);
+      }
+
+      .tape-highlight {
+        color: var(--amber);
+        background: rgba(255, 153, 0, 0.1);
+        padding: 2px 8px;
+        border-radius: 4px;
+      }
+
+      /* Bloomberg Command Bar */
+      .command-bar-section {
+        background: var(--crt-surface);
+        border-bottom: 1px solid var(--crt-border);
+        padding: 10px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .command-prompt-box {
+        display: flex;
+        align-items: center;
+        background: var(--crt-bg);
+        border: 1px solid var(--amber);
+        border-radius: 4px;
+        padding: 4px 10px;
+        box-shadow: 0 0 10px var(--amber-glow);
+      }
+
+      .command-prefix {
+        color: var(--amber);
+        font-weight: 800;
+        margin-right: 8px;
+      }
+
+      .command-input {
+        flex: 1;
+        background: transparent;
+        border: none;
+        color: var(--text-main);
+        font-family: var(--font-mono);
+        font-size: 0.95rem;
+        font-weight: 700;
+        outline: none;
+      }
+
+      .btn-go {
+        background: var(--amber);
+        color: black;
+        border: none;
+        font-family: var(--font-mono);
+        font-weight: 900;
+        font-size: 0.85rem;
+        padding: 4px 12px;
+        border-radius: 2px;
+        cursor: pointer;
+        box-shadow: 0 0 8px var(--amber-glow);
+      }
+
+      .btn-go:active {
+        transform: scale(0.96);
+      }
+
+      .quick-commands {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+
+      .cmd-chip {
+        background: var(--crt-elevated);
+        border: 1px solid var(--crt-border);
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        font-weight: 700;
+        padding: 4px 12px;
+        border-radius: 4px;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: all 0.15s ease;
+      }
+
+      .cmd-chip:hover,
+      .cmd-chip.active {
+        background: rgba(0, 216, 255, 0.12);
+        border-color: var(--cyan);
+        color: var(--cyan);
+        box-shadow: 0 0 8px var(--cyan-glow);
+      }
+
+      /* Terminal Body */
+      .terminal-body {
+        flex: 1;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .screen-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        border-bottom: 1px solid var(--crt-border);
+        padding-bottom: 12px;
+        margin-bottom: 16px;
+      }
+
+      .screen-title {
+        color: var(--amber);
+        font-size: 1.15rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+      }
+
+      .screen-subtitle {
+        font-size: 0.75rem;
+        color: var(--text-dim);
+        display: block;
+        margin-top: 2px;
+      }
+
+      /* Bloomberg Tables */
+      .terminal-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.85rem;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .terminal-table th {
+        background: #090e18;
+        color: var(--text-muted);
+        font-weight: 700;
+        text-align: left;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--crt-border-bright);
+        font-size: 0.75rem;
+        letter-spacing: 0.05em;
+      }
+
+      .terminal-table td {
+        padding: 8px 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      }
+
+      .terminal-table tr:hover {
+        background: rgba(255, 153, 0, 0.04);
+      }
+
+      /* Flashing cells */
+      .cell-flash-up {
+        background-color: rgba(0, 255, 102, 0.35) !important;
+        color: var(--green) !important;
+        transition: background-color 0.4s ease;
+      }
+
+      .cell-flash-down {
+        background-color: rgba(255, 51, 68, 0.35) !important;
+        color: var(--red) !important;
+        transition: background-color 0.4s ease;
+      }
+
+      .text-green {
+        color: var(--green);
+      }
+      .text-red {
+        color: var(--red);
+      }
+      .text-cyan {
+        color: var(--cyan);
+      }
+      .text-amber {
+        color: var(--amber);
+      }
+
+      /* Orderflow bar */
+      .orderflow-bar {
+        height: 8px;
+        background: #1e293b;
+        border-radius: 4px;
+        display: flex;
+        overflow: hidden;
+        width: 100px;
+      }
+
+      .orderflow-buy {
+        background: var(--green);
+        height: 100%;
+      }
+      .orderflow-sell {
+        background: var(--red);
+        height: 100%;
+      }
+
+      /* Aladdin KPI Grid */
+      .aladdin-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 12px;
+      }
+
+      .kpi-card {
+        background: var(--crt-surface);
+        border: 1px solid var(--crt-border);
+        border-radius: 6px;
+        padding: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .kpi-label {
+        font-size: 0.65rem;
+        font-weight: 700;
+        color: var(--text-dim);
+        letter-spacing: 0.06em;
+      }
+
+      .kpi-val {
+        font-size: 1.5rem;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+      }
+
+      .kpi-sub {
+        font-size: 0.7rem;
+        color: var(--text-muted);
+      }
+
+      /* Stress scenarios */
+      .terminal-section {
+        background: var(--crt-surface);
+        border: 1px solid var(--crt-border);
+        border-radius: 6px;
+        padding: 16px;
+      }
+
+      .section-header-flex {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 14px;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .section-title {
+        font-size: 0.85rem;
+        font-weight: 800;
+        color: var(--amber);
+        letter-spacing: 0.05em;
+      }
+
+      .section-desc {
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        margin-top: 2px;
+      }
+
+      .scenario-buttons {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .scenario-btn {
+        background: var(--crt-elevated);
+        border: 1px solid var(--crt-border);
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        font-weight: 700;
+        padding: 6px 12px;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+
+      .scenario-btn.active {
+        background: rgba(255, 51, 68, 0.15);
+        border-color: var(--red);
+        color: var(--red);
+      }
+
+      .stress-summary-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        background: #080c14;
+        border: 1px solid var(--crt-border);
+        border-radius: 4px;
+        padding: 14px;
+        margin-bottom: 12px;
+      }
+
+      .stat-label {
+        font-size: 0.65rem;
+        color: var(--text-dim);
+        display: block;
+        text-transform: uppercase;
+      }
+
+      .stat-val {
+        font-size: 1.1rem;
+        font-weight: 800;
+        margin-top: 2px;
+        display: block;
+      }
+
+      .health-pill {
+        font-size: 0.7rem;
+        font-weight: 700;
+        padding: 2px 8px;
+        border-radius: 4px;
+      }
+
+      .health-safe {
+        background: rgba(0, 255, 102, 0.15);
+        color: var(--green);
+        border: 1px solid var(--green);
+      }
+      .health-warning {
+        background: rgba(255, 153, 0, 0.15);
+        color: var(--amber);
+        border: 1px solid var(--amber);
+      }
+      .health-critical {
+        background: rgba(255, 51, 68, 0.2);
+        color: var(--red);
+        border: 1px solid var(--red);
+      }
+
+      /* Regime badges */
+      .regime-badge {
+        font-size: 0.7rem;
+        font-weight: 700;
+        padding: 2px 6px;
+        border-radius: 3px;
+      }
+
+      .regime-extreme {
+        background: rgba(255, 153, 0, 0.2);
+        color: var(--amber);
+        border: 1px solid var(--amber);
+      }
+      .regime-squeeze {
+        background: rgba(255, 51, 68, 0.25);
+        color: var(--red);
+        border: 1px solid var(--red);
+      }
+      .regime-normal {
+        background: rgba(255, 255, 255, 0.05);
+        color: var(--text-muted);
+      }
+
+      /* Help Screen */
+      .help-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 14px;
+      }
+
+      .help-card {
+        background: var(--crt-surface);
+        border: 1px solid var(--crt-border);
+        border-radius: 6px;
+        padding: 14px;
+      }
+
+      .help-cmd {
+        color: var(--cyan);
+        font-weight: 800;
+        font-size: 0.95rem;
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      /* Terminal Footer */
+      .terminal-footer {
+        background: #020305;
+        border-top: 1px solid var(--crt-border);
+        padding: 8px 16px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.7rem;
+        color: var(--text-dim);
+      }
+
+      .footer-left {
+        display: flex;
+        gap: 12px;
+        color: var(--text-muted);
+      }
+
+      .mt-3 {
+        margin-top: 12px;
+      }
+      .mt-4 {
+        margin-top: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="terminal-root"></div>
+
+    <!-- Load bundled web terminal application -->
+    <script type="module" src="./dist/web.js"></script>
+    <script>
+      if (
+        "serviceWorker" in navigator &&
+        window.location.protocol.startsWith("http")
+      ) {
+        navigator.serviceWorker.register("./sw.js").catch(() => {});
+      }
+    </script>
+  </body>
+</html>

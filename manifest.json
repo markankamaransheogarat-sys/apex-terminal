@@ -1,0 +1,16 @@
+{
+  "name": "APEX TERMINAL",
+  "short_name": "ApexTerminal",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#040608",
+  "theme_color": "#040608",
+  "description": "Institutional Bloomberg Terminal & BlackRock Aladdin Risk Engine for Digital Assets",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}

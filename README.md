@@ -2,9 +2,12 @@
 
 Institutional-grade digital asset execution telemetry, real-time public feeds, and Aladdin risk analytics engine.
 
-[![Build & Tests](https://img.shields.io/badge/tests-46%20passed-brightgreen.svg)]()
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue.svg)]()
-[![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg)]()
+[![Live Terminal](https://img.shields.io/badge/Live_Terminal-GitHub_Pages-00d8ff?style=for-the-badge&logo=github)](https://markankamaransheogarat-sys.github.io/apex-terminal/)
+[![Tests](https://img.shields.io/badge/Tests-75%2F75_Passed-00ff66?style=for-the-badge)](https://github.com/markankamaransheogarat-sys/apex-terminal)
+[![Audio](https://img.shields.io/badge/Audio-Procedural_Web_Audio-ff9900?style=for-the-badge)](https://github.com/markankamaransheogarat-sys/apex-terminal)
+[![Zero-Cloud](https://img.shields.io/badge/Zero--Cloud-100%25_Local-8b5cf6?style=for-the-badge)](https://github.com/markankamaransheogarat-sys/apex-terminal)
+
+👉 **Launch Live Web Terminal**: [https://markankamaransheogarat-sys.github.io/apex-terminal/](https://markankamaransheogarat-sys.github.io/apex-terminal/)
 
 ---
 
