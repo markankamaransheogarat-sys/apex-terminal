@@ -149,4 +149,92 @@ describe("WhaleClusterEngine - 4-Factor Microstructure Tranche Linking", () => {
     const loaded = await store.loadAll24hTrades();
     assert.ok(Array.isArray(loaded));
   });
+
+  it("should generate ONCHAIN_DUMP_WATCH and BULLISH_BID_ABSORPTION alpha signals", () => {
+    const baseTime = 1793897000000;
+    const trades: WhaleTrade[] = [
+      // 1. On-chain BTC mempool transfer followed by 2 exchange SELL tranches -> ONCHAIN_DUMP_WATCH (SHORT)
+      {
+        id: "oc-1",
+        symbol: "BTCUSDT",
+        asset: "BTC",
+        side: "SELL",
+        price: 76900,
+        quantity: 20,
+        valueUsd: 1_538_000,
+        tier: "KRAKEN",
+        timestamp: baseTime,
+        venue: "BTC_MEMPOOL",
+        txHash: "abc123def456",
+      },
+      {
+        id: "ex-1",
+        symbol: "BTCUSDT",
+        asset: "BTC",
+        side: "SELL",
+        price: 76880,
+        quantity: 10,
+        valueUsd: 768_800,
+        tier: "MEGALODON",
+        timestamp: baseTime + 120_000,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 25,
+      },
+      {
+        id: "ex-2",
+        symbol: "BTCUSDT",
+        asset: "BTC",
+        side: "SELL",
+        price: 76820,
+        quantity: 10,
+        valueUsd: 768_200,
+        tier: "MEGALODON",
+        timestamp: baseTime + 180_000,
+        venue: "BYBIT_PERP",
+        ordersSwept: 22,
+      },
+      // 2. Heavy SOL market SELL tranches where price actually rises (135.00 -> 135.20) -> BULLISH_BID_ABSORPTION (LONG)
+      {
+        id: "abs-1",
+        symbol: "SOLUSDT",
+        asset: "SOL",
+        side: "SELL",
+        price: 135.0,
+        quantity: 3000,
+        valueUsd: 405_000,
+        tier: "WHALE",
+        timestamp: baseTime + 10_000,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 19,
+      },
+      {
+        id: "abs-2",
+        symbol: "SOLUSDT",
+        asset: "SOL",
+        side: "SELL",
+        price: 135.2,
+        quantity: 3000,
+        valueUsd: 405_600,
+        tier: "WHALE",
+        timestamp: baseTime + 45_000,
+        venue: "BINANCE_SPOT",
+        ordersSwept: 24,
+      },
+    ];
+
+    const campaigns = WhaleClusterEngine.clusterTrades(trades);
+    const signals = WhaleClusterEngine.generateAlphaSignals(campaigns, trades);
+
+    assert.ok(signals.length >= 2);
+    const btcSig = signals.find((s) => s.asset === "BTC");
+    const solSig = signals.find((s) => s.asset === "SOL");
+
+    assert.ok(btcSig);
+    assert.equal(btcSig.signalType, "ONCHAIN_DUMP_WATCH");
+    assert.equal(btcSig.direction, "SHORT");
+
+    assert.ok(solSig);
+    assert.equal(solSig.signalType, "BULLISH_BID_ABSORPTION");
+    assert.equal(solSig.direction, "LONG");
+  });
 });

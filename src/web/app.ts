@@ -1228,6 +1228,8 @@ class ApexWebTerminal {
       .getTrancheCampaigns()
       .filter((c) => c.trancheCount >= 2).length;
 
+    const alphaSignals = this.whaleStream.getAlphaSignals();
+
     const isNetPositive = metrics.netWhaleDeltaUsd >= 0;
 
     container.innerHTML = `
@@ -1277,9 +1279,75 @@ class ApexWebTerminal {
           <div class="kpi-card">
             <span class="kpi-label">LINKED TRANCHE CAMPAIGNS</span>
             <span class="kpi-val text-amber">${multiTrancheCount} CAMPAIGNS</span>
-            <span class="kpi-sub">${allTrades.filter((t) => t.valueUsd >= 1000000).length} KRAKEN BLOCKS (&gt;$1M)</span>
+            <span class="kpi-sub">${alphaSignals.length} ACTIVE ALPHA SIGNALS · ${allTrades.filter((t) => t.valueUsd >= 1000000).length} KRAKENS</span>
           </div>
         </div>
+
+        <!-- Hybrid Pre-Trade On-Chain + Orderbook Absorption Alpha Signals -->
+        <section class="terminal-section mt-3">
+          <div class="section-header-flex">
+            <div>
+              <span class="section-title">🎯 HYBRID ALPHA ENGINE: PRE-TRADE ON-CHAIN CORRELATION &amp; LIMIT ABSORPTION RADAR</span>
+              <p class="section-desc">Links unconfirmed Bitcoin Mempool transfers with exchange orderbook tranches, detects passive limit walls absorbing market dumps (Absorption), and reconstructs 24h Binance 15m Taker Delta.</p>
+            </div>
+          </div>
+
+          <div class="market-matrix-table-wrap mt-2">
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>SIGNAL BIAS</th>
+                  <th>ALPHA PATTERN</th>
+                  <th>CONVICTION</th>
+                  <th>TRIGGER / VWAP</th>
+                  <th>LINKED FLOW</th>
+                  <th>INSTITUTIONAL MICROSTRUCTURE RATIONALE</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${
+                  alphaSignals.length === 0
+                    ? `<tr><td colspan="6" class="text-center">Scanning 24h orderflow &amp; mempool for high-conviction absorption and on-chain correlations...</td></tr>`
+                    : alphaSignals
+                        .map((sig) => {
+                          const dirClass =
+                            sig.direction === "LONG"
+                              ? "text-green"
+                              : "text-red";
+                          return `
+                      <tr class="row-highlight">
+                        <td class="${dirClass} font-bold">
+                          ${sig.direction === "LONG" ? "🟢 LONG ALPHA" : "🔴 SHORT ALPHA"}
+                          <div class="text-dim" style="font-size: 0.7rem;">${sig.asset}/USDT</div>
+                        </td>
+                        <td>
+                          <span class="regime-badge ${sig.signalType.includes("ABSORPTION") || sig.signalType.includes("ONCHAIN") ? "regime-squeeze" : "regime-extreme"}">
+                            ${sig.signalType}
+                          </span>
+                        </td>
+                        <td>
+                          <strong class="text-amber">${sig.conviction}%</strong>
+                        </td>
+                        <td class="font-bold">
+                          $${sig.triggerPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
+                        </td>
+                        <td>
+                          <strong class="text-cyan">$${Math.round(sig.notionalUsd).toLocaleString()}</strong>
+                          <div class="text-amber" style="font-size: 0.72rem;">#${sig.linkedCampaignId}</div>
+                        </td>
+                        <td>
+                          <div><strong>${sig.headline}</strong></div>
+                          <div class="text-dim" style="font-size: 0.75rem;">${sig.rationale}</div>
+                        </td>
+                      </tr>
+                    `;
+                        })
+                        .join("")
+                }
+              </tbody>
+            </table>
+          </div>
+        </section>
 
         <!-- Linked Whale Tranche Campaigns Table -->
         <section class="terminal-section mt-3">

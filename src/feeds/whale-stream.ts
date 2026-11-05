@@ -12,6 +12,7 @@
  */
 
 import {
+  InstitutionalAlphaSignal,
   WhaleClusterEngine,
   WhalePersistenceStore,
   WhaleTrancheCampaign,
@@ -166,6 +167,13 @@ export class WhaleStreamManager {
 
   public getTrancheCampaigns(): WhaleTrancheCampaign[] {
     return [...this.campaigns];
+  }
+
+  public getAlphaSignals(): InstitutionalAlphaSignal[] {
+    return WhaleClusterEngine.generateAlphaSignals(
+      this.campaigns,
+      this.whaleTrades,
+    );
   }
 
   public getLiquidations(): LiquidationEvent[] {
@@ -668,6 +676,94 @@ export class WhaleStreamManager {
         }
       }
     } catch {}
+
+    // C. Reconstruct 24-Hour Institutional Orderflow Spikes from Binance 15m Klines (96 x 15m = 24h)
+    const klineSymbols = [
+      { sym: "BTCUSDT", asset: "BTC", minNetDeltaUsd: 4_000_000 },
+      { sym: "ETHUSDT", asset: "ETH", minNetDeltaUsd: 2_000_000 },
+      { sym: "SOLUSDT", asset: "SOL", minNetDeltaUsd: 1_000_000 },
+    ];
+
+    for (const cfg of klineSymbols) {
+      try {
+        const res = await fetch(
+          `https://api.binance.com/api/v3/klines?symbol=${cfg.sym}&interval=15m&limit=96`,
+        );
+        if (res.ok) {
+          const klines = await res.json();
+          if (Array.isArray(klines)) {
+            for (const k of klines) {
+              // Binance kline format:
+              // [0] openTime, [1] open, [2] high, [3] low, [4] close, [5] volume,
+              // [6] closeTime, [7] quoteAssetVolume, [8] numberOfTrades,
+              // [9] takerBuyBaseAssetVolume, [10] takerBuyQuoteAssetVolume
+              const openTime = Number(k[0]);
+              const openPrice = parseFloat(k[1] || "0");
+              const closePrice = parseFloat(k[4] || "0");
+              const totalQuoteUsd = parseFloat(k[7] || "0");
+              const numTrades = Number(k[8] || 1);
+              const takerBuyUsd = parseFloat(k[10] || "0");
+              const takerSellUsd = Math.max(0, totalQuoteUsd - takerBuyUsd);
+              const netDeltaUsd = takerBuyUsd - takerSellUsd;
+
+              if (
+                Math.abs(netDeltaUsd) >= cfg.minNetDeltaUsd &&
+                closePrice > 0
+              ) {
+                const side: "BUY" | "SELL" = netDeltaUsd >= 0 ? "BUY" : "SELL";
+                // Split significant 15m institutional burst into 2 representative linked tranches
+                const trancheUsd = Math.abs(netDeltaUsd) * 0.25;
+                if (trancheUsd >= 100_000) {
+                  const qty1 = trancheUsd / openPrice;
+                  const qty2 = trancheUsd / closePrice;
+                  this.recordWhaleTrade(
+                    {
+                      id: `bn-24h-kline-${cfg.sym}-${openTime}-1`,
+                      symbol: cfg.sym,
+                      asset: cfg.asset,
+                      side,
+                      price: openPrice,
+                      quantity: qty1,
+                      valueUsd: trancheUsd,
+                      tier: this.classifyTier(trancheUsd),
+                      timestamp: openTime + 180_000,
+                      venue: "BINANCE_SPOT",
+                      ordersSwept: Math.max(15, Math.round(numTrades / 250)),
+                    },
+                    false,
+                  );
+                  this.recordWhaleTrade(
+                    {
+                      id: `bn-24h-kline-${cfg.sym}-${openTime}-2`,
+                      symbol: cfg.sym,
+                      asset: cfg.asset,
+                      side,
+                      price: closePrice,
+                      quantity: qty2,
+                      valueUsd: trancheUsd,
+                      tier: this.classifyTier(trancheUsd),
+                      timestamp: openTime + 420_000,
+                      venue: "BINANCE_SPOT",
+                      ordersSwept: Math.max(18, Math.round(numTrades / 220)),
+                    },
+                    false,
+                  );
+                }
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // Notify listeners once after full 24h backfill completes
+    if (this.whaleTrades.length > 0) {
+      this.whaleListeners.forEach((fn) => {
+        try {
+          fn(this.whaleTrades[0]!);
+        } catch {}
+      });
+    }
   }
 
   public disconnect(): void {
@@ -913,15 +1009,30 @@ export class WhaleStreamManager {
         venue: "BINANCE_SPOT",
         ordersSwept: 31,
       },
-      // Campaign 3: SOL TWAP Distribution (2 tranches)
+      // On-Chain BTC Mempool Whale Settlement (Correlated with BTC Spot Accumulation Campaign)
+      {
+        id: "wh-base-btc-mempool-1",
+        symbol: "BTCUSDT",
+        asset: "BTC",
+        side: "BUY",
+        price: 76885.0,
+        quantity: 18.5,
+        valueUsd: 1_422_372,
+        tier: "KRAKEN",
+        timestamp: now - 420 * 1000,
+        venue: "BTC_MEMPOOL",
+        ordersSwept: 1,
+        txHash: "7f9a82b4c10e3d44a9128b0c7e65f12a9b43",
+      },
+      // Campaign 3: SOL Limit Bid Absorption (Heavy market SELL tranches, but price rises from 134.90 to 135.05 -> Passive Whale Absorbing!)
       {
         id: "wh-base-sol-2",
         symbol: "SOLUSDT",
         asset: "SOL",
         side: "SELL",
-        price: 134.9,
+        price: 135.05,
         quantity: 3800.0,
-        valueUsd: 512_620,
+        valueUsd: 513_190,
         tier: "MEGALODON",
         timestamp: now - 320 * 1000,
         venue: "BYBIT_PERP",
@@ -932,9 +1043,9 @@ export class WhaleStreamManager {
         symbol: "SOLUSDT",
         asset: "SOL",
         side: "SELL",
-        price: 135.4,
+        price: 134.9,
         quantity: 4100.0,
-        valueUsd: 555_140,
+        valueUsd: 553_090,
         tier: "MEGALODON",
         timestamp: now - 380 * 1000,
         venue: "BINANCE_SPOT",

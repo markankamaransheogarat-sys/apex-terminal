@@ -1787,6 +1787,81 @@ var WhaleClusterEngine = class _WhaleClusterEngine {
       c.confidenceScore = 74;
     }
   }
+  /**
+   * Generates high-conviction Institutional Alpha Signals by combining:
+   * 1. Pre-Trade On-Chain Mempool transfers correlated with Exchange Orderbook Tranches
+   * 2. Limit Orderbook Absorption (Heavy Taker Delta failing to move price -> Passive Whale Wall)
+   * 3. Multi-Tranche Iceberg / Cross-Venue Momentum Breakouts
+   */
+  static generateAlphaSignals(campaigns, allTrades) {
+    const signals = [];
+    const onChainTransfers = allTrades.filter(
+      (t) => t.venue === "BTC_MEMPOOL" && t.valueUsd >= 1e5
+    );
+    for (const c of campaigns) {
+      if (c.totalValueUsd < 15e4) continue;
+      const linkedOnChain = onChainTransfers.find(
+        (tx) => tx.asset === c.asset && Math.abs(c.lastTime - tx.timestamp) <= 45 * 60 * 1e3
+      );
+      if (linkedOnChain && c.venues.some((v) => v !== "BTC_MEMPOOL") && c.trancheCount >= 2) {
+        const isSellDump = c.side === "SELL";
+        const leadMin = Math.max(
+          1,
+          Math.round(Math.abs(c.lastTime - linkedOnChain.timestamp) / 6e4)
+        );
+        signals.push({
+          id: `SIG-OC-${c.campaignId}`,
+          timestamp: c.lastTime,
+          asset: c.asset,
+          signalType: isSellDump ? "ONCHAIN_DUMP_WATCH" : "ONCHAIN_ACCUMULATION",
+          direction: isSellDump ? "SHORT" : "LONG",
+          conviction: Math.min(98, c.confidenceScore + 6),
+          headline: isSellDump ? `\u{1F534} CONFIRMED ON-CHAIN DUMP: ${c.asset} Mempool Inflow -> ${c.trancheCount} Sell Tranches` : `\u{1F7E2} CONFIRMED ON-CHAIN ACCUMULATION: ${c.trancheCount} Spot Buy Clips + On-Chain Settlement`,
+          rationale: `On-chain transfer of $${Math.round(linkedOnChain.valueUsd).toLocaleString()} (${linkedOnChain.quantity.toFixed(2)} ${c.asset}) correlated with ${c.trancheCount} ${c.side} tranches ($${Math.round(c.totalValueUsd).toLocaleString()} total @ VWAP $${c.vwapPrice.toLocaleString()}) across ${c.venues.join("+")} (${leadMin}m window).`,
+          triggerPrice: c.lastPrice,
+          notionalUsd: c.totalValueUsd + linkedOnChain.valueUsd,
+          linkedCampaignId: c.campaignId
+        });
+        continue;
+      }
+      if (c.trancheCount >= 2 && c.totalValueUsd >= 25e4 && c.priceImpactBps <= 0.8) {
+        const isBullishBidAbsorption = c.side === "SELL";
+        signals.push({
+          id: `SIG-ABS-${c.campaignId}`,
+          timestamp: c.lastTime,
+          asset: c.asset,
+          signalType: isBullishBidAbsorption ? "BULLISH_BID_ABSORPTION" : "BEARISH_ASK_ABSORPTION",
+          direction: isBullishBidAbsorption ? "LONG" : "SHORT",
+          conviction: Math.min(
+            96,
+            82 + Math.min(12, Math.floor(c.totalValueUsd / 2e5))
+          ),
+          headline: isBullishBidAbsorption ? `\u26A1 BULLISH BID ABSORPTION: $${Math.round(c.totalValueUsd).toLocaleString()} Market Sells Absorbed @ $${c.vwapPrice.toLocaleString()}` : `\u26A1 BEARISH ASK ABSORPTION: $${Math.round(c.totalValueUsd).toLocaleString()} Market Buys Capped @ $${c.vwapPrice.toLocaleString()}`,
+          rationale: `${c.trancheCount} aggressive ${c.side} tranches (${c.totalOrdersSwept} orders swept) hit ${c.venues.join("+")}, but price failed to move (${c.priceImpactBps.toFixed(1)} bps impact). Passive institutional limit wall is absorbing flow.`,
+          triggerPrice: c.vwapPrice,
+          notionalUsd: c.totalValueUsd,
+          linkedCampaignId: c.campaignId
+        });
+        continue;
+      }
+      if (c.trancheCount >= 2 && c.totalValueUsd >= 25e4 && c.priceImpactBps >= 2.5 && (c.algoType === "ICEBERG_CLIP" || c.algoType === "CROSS_VENUE_SWEEP" || c.algoType === "TWAP_CAMPAIGN")) {
+        signals.push({
+          id: `SIG-MOM-${c.campaignId}`,
+          timestamp: c.lastTime,
+          asset: c.asset,
+          signalType: "ICEBERG_MOMENTUM_BREAKOUT",
+          direction: c.side === "BUY" ? "LONG" : "SHORT",
+          conviction: c.confidenceScore,
+          headline: `${c.side === "BUY" ? "\u{1F7E2}" : "\u{1F534}"} ${c.algoType} MOMENTUM: ${c.asset} ${c.trancheCount} Tranches Driving +${c.priceImpactBps.toFixed(1)} bps`,
+          rationale: `Institutional ${c.algoType} (${c.lotUniformityScore}% lot uniformity, avg ${Math.round(c.meanIntervalSec)}s cadence) swept ${c.totalOrdersSwept} limit orders across ${c.venues.join("+")} with VWAP $${c.vwapPrice.toLocaleString()}.`,
+          triggerPrice: c.lastPrice,
+          notionalUsd: c.totalValueUsd,
+          linkedCampaignId: c.campaignId
+        });
+      }
+    }
+    return signals.sort((a, b) => b.conviction - a.conviction).slice(0, 8);
+  }
 };
 var WhalePersistenceStore = class _WhalePersistenceStore {
   static DB_NAME = "apex_whale_intelligence_db";
@@ -1991,6 +2066,12 @@ var WhaleStreamManager = class _WhaleStreamManager {
   }
   getTrancheCampaigns() {
     return [...this.campaigns];
+  }
+  getAlphaSignals() {
+    return WhaleClusterEngine.generateAlphaSignals(
+      this.campaigns,
+      this.whaleTrades
+    );
   }
   getLiquidations() {
     return [...this.liquidations];
@@ -2429,6 +2510,82 @@ var WhaleStreamManager = class _WhaleStreamManager {
       }
     } catch {
     }
+    const klineSymbols = [
+      { sym: "BTCUSDT", asset: "BTC", minNetDeltaUsd: 4e6 },
+      { sym: "ETHUSDT", asset: "ETH", minNetDeltaUsd: 2e6 },
+      { sym: "SOLUSDT", asset: "SOL", minNetDeltaUsd: 1e6 }
+    ];
+    for (const cfg of klineSymbols) {
+      try {
+        const res = await fetch(
+          `https://api.binance.com/api/v3/klines?symbol=${cfg.sym}&interval=15m&limit=96`
+        );
+        if (res.ok) {
+          const klines = await res.json();
+          if (Array.isArray(klines)) {
+            for (const k of klines) {
+              const openTime = Number(k[0]);
+              const openPrice = parseFloat(k[1] || "0");
+              const closePrice = parseFloat(k[4] || "0");
+              const totalQuoteUsd = parseFloat(k[7] || "0");
+              const numTrades = Number(k[8] || 1);
+              const takerBuyUsd = parseFloat(k[10] || "0");
+              const takerSellUsd = Math.max(0, totalQuoteUsd - takerBuyUsd);
+              const netDeltaUsd = takerBuyUsd - takerSellUsd;
+              if (Math.abs(netDeltaUsd) >= cfg.minNetDeltaUsd && closePrice > 0) {
+                const side = netDeltaUsd >= 0 ? "BUY" : "SELL";
+                const trancheUsd = Math.abs(netDeltaUsd) * 0.25;
+                if (trancheUsd >= 1e5) {
+                  const qty1 = trancheUsd / openPrice;
+                  const qty2 = trancheUsd / closePrice;
+                  this.recordWhaleTrade(
+                    {
+                      id: `bn-24h-kline-${cfg.sym}-${openTime}-1`,
+                      symbol: cfg.sym,
+                      asset: cfg.asset,
+                      side,
+                      price: openPrice,
+                      quantity: qty1,
+                      valueUsd: trancheUsd,
+                      tier: this.classifyTier(trancheUsd),
+                      timestamp: openTime + 18e4,
+                      venue: "BINANCE_SPOT",
+                      ordersSwept: Math.max(15, Math.round(numTrades / 250))
+                    },
+                    false
+                  );
+                  this.recordWhaleTrade(
+                    {
+                      id: `bn-24h-kline-${cfg.sym}-${openTime}-2`,
+                      symbol: cfg.sym,
+                      asset: cfg.asset,
+                      side,
+                      price: closePrice,
+                      quantity: qty2,
+                      valueUsd: trancheUsd,
+                      tier: this.classifyTier(trancheUsd),
+                      timestamp: openTime + 42e4,
+                      venue: "BINANCE_SPOT",
+                      ordersSwept: Math.max(18, Math.round(numTrades / 220))
+                    },
+                    false
+                  );
+                }
+              }
+            }
+          }
+        }
+      } catch {
+      }
+    }
+    if (this.whaleTrades.length > 0) {
+      this.whaleListeners.forEach((fn) => {
+        try {
+          fn(this.whaleTrades[0]);
+        } catch {
+        }
+      });
+    }
   }
   disconnect() {
     this.isDestroyed = true;
@@ -2662,15 +2819,30 @@ var WhaleStreamManager = class _WhaleStreamManager {
         venue: "BINANCE_SPOT",
         ordersSwept: 31
       },
-      // Campaign 3: SOL TWAP Distribution (2 tranches)
+      // On-Chain BTC Mempool Whale Settlement (Correlated with BTC Spot Accumulation Campaign)
+      {
+        id: "wh-base-btc-mempool-1",
+        symbol: "BTCUSDT",
+        asset: "BTC",
+        side: "BUY",
+        price: 76885,
+        quantity: 18.5,
+        valueUsd: 1422372,
+        tier: "KRAKEN",
+        timestamp: now - 420 * 1e3,
+        venue: "BTC_MEMPOOL",
+        ordersSwept: 1,
+        txHash: "7f9a82b4c10e3d44a9128b0c7e65f12a9b43"
+      },
+      // Campaign 3: SOL Limit Bid Absorption (Heavy market SELL tranches, but price rises from 134.90 to 135.05 -> Passive Whale Absorbing!)
       {
         id: "wh-base-sol-2",
         symbol: "SOLUSDT",
         asset: "SOL",
         side: "SELL",
-        price: 134.9,
+        price: 135.05,
         quantity: 3800,
-        valueUsd: 512620,
+        valueUsd: 513190,
         tier: "MEGALODON",
         timestamp: now - 320 * 1e3,
         venue: "BYBIT_PERP",
@@ -2681,9 +2853,9 @@ var WhaleStreamManager = class _WhaleStreamManager {
         symbol: "SOLUSDT",
         asset: "SOL",
         side: "SELL",
-        price: 135.4,
+        price: 134.9,
         quantity: 4100,
-        valueUsd: 555140,
+        valueUsd: 553090,
         tier: "MEGALODON",
         timestamp: now - 380 * 1e3,
         venue: "BINANCE_SPOT",
@@ -5445,6 +5617,7 @@ var ApexWebTerminal = class {
     });
     const campaigns = this.whaleStream.getTrancheCampaigns().filter((c) => c.trancheCount >= 2 || c.totalValueUsd >= 2e5).slice(0, 12);
     const multiTrancheCount = this.whaleStream.getTrancheCampaigns().filter((c) => c.trancheCount >= 2).length;
+    const alphaSignals = this.whaleStream.getAlphaSignals();
     const isNetPositive = metrics.netWhaleDeltaUsd >= 0;
     container.innerHTML = `
       <div class="terminal-screen screen-whale">
@@ -5493,9 +5666,66 @@ var ApexWebTerminal = class {
           <div class="kpi-card">
             <span class="kpi-label">LINKED TRANCHE CAMPAIGNS</span>
             <span class="kpi-val text-amber">${multiTrancheCount} CAMPAIGNS</span>
-            <span class="kpi-sub">${allTrades.filter((t) => t.valueUsd >= 1e6).length} KRAKEN BLOCKS (&gt;$1M)</span>
+            <span class="kpi-sub">${alphaSignals.length} ACTIVE ALPHA SIGNALS \xB7 ${allTrades.filter((t) => t.valueUsd >= 1e6).length} KRAKENS</span>
           </div>
         </div>
+
+        <!-- Hybrid Pre-Trade On-Chain + Orderbook Absorption Alpha Signals -->
+        <section class="terminal-section mt-3">
+          <div class="section-header-flex">
+            <div>
+              <span class="section-title">\u{1F3AF} HYBRID ALPHA ENGINE: PRE-TRADE ON-CHAIN CORRELATION &amp; LIMIT ABSORPTION RADAR</span>
+              <p class="section-desc">Links unconfirmed Bitcoin Mempool transfers with exchange orderbook tranches, detects passive limit walls absorbing market dumps (Absorption), and reconstructs 24h Binance 15m Taker Delta.</p>
+            </div>
+          </div>
+
+          <div class="market-matrix-table-wrap mt-2">
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>SIGNAL BIAS</th>
+                  <th>ALPHA PATTERN</th>
+                  <th>CONVICTION</th>
+                  <th>TRIGGER / VWAP</th>
+                  <th>LINKED FLOW</th>
+                  <th>INSTITUTIONAL MICROSTRUCTURE RATIONALE</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${alphaSignals.length === 0 ? `<tr><td colspan="6" class="text-center">Scanning 24h orderflow &amp; mempool for high-conviction absorption and on-chain correlations...</td></tr>` : alphaSignals.map((sig) => {
+      const dirClass = sig.direction === "LONG" ? "text-green" : "text-red";
+      return `
+                      <tr class="row-highlight">
+                        <td class="${dirClass} font-bold">
+                          ${sig.direction === "LONG" ? "\u{1F7E2} LONG ALPHA" : "\u{1F534} SHORT ALPHA"}
+                          <div class="text-dim" style="font-size: 0.7rem;">${sig.asset}/USDT</div>
+                        </td>
+                        <td>
+                          <span class="regime-badge ${sig.signalType.includes("ABSORPTION") || sig.signalType.includes("ONCHAIN") ? "regime-squeeze" : "regime-extreme"}">
+                            ${sig.signalType}
+                          </span>
+                        </td>
+                        <td>
+                          <strong class="text-amber">${sig.conviction}%</strong>
+                        </td>
+                        <td class="font-bold">
+                          $${sig.triggerPrice.toLocaleString(void 0, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
+                        </td>
+                        <td>
+                          <strong class="text-cyan">$${Math.round(sig.notionalUsd).toLocaleString()}</strong>
+                          <div class="text-amber" style="font-size: 0.72rem;">#${sig.linkedCampaignId}</div>
+                        </td>
+                        <td>
+                          <div><strong>${sig.headline}</strong></div>
+                          <div class="text-dim" style="font-size: 0.75rem;">${sig.rationale}</div>
+                        </td>
+                      </tr>
+                    `;
+    }).join("")}
+              </tbody>
+            </table>
+          </div>
+        </section>
 
         <!-- Linked Whale Tranche Campaigns Table -->
         <section class="terminal-section mt-3">
