@@ -798,6 +798,115 @@ export class ApexSoundEngine {
   }
 
   /**
+   * 6. playWhalePing(valueUsd)
+   * Deep oceanic sonar & sub-bass resonance for large institutional transactions (>= $100k)
+   */
+  playWhalePing(valueUsd = 100000) {
+    if (this.muted) return;
+    const ctx = this.getContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const dest = this.masterGain || ctx.destination;
+
+    try {
+      if (typeof ctx.createOscillator === "function") {
+        // Deep sub-bass hydrophone swell (48Hz -> 30Hz)
+        const subOsc = ctx.createOscillator();
+        subOsc.type = "sine";
+        subOsc.frequency.setValueAtTime?.(48, now);
+        subOsc.frequency.exponentialRampToValueAtTime?.(28, now + 0.85);
+
+        const subGain = ctx.createGain();
+        const baseGain = Math.min(0.65, 0.28 + (valueUsd / 1000000) * 0.2);
+        subGain.gain.setValueAtTime?.(0.0001, now);
+        subGain.gain.linearRampToValueAtTime?.(baseGain, now + 0.02);
+        subGain.gain.exponentialRampToValueAtTime?.(0.0001, now + 0.9);
+
+        subOsc.connect(subGain);
+        subGain.connect(dest);
+        subOsc.start(now);
+        subOsc.stop(now + 0.92);
+
+        // High crystal sonar ping (2093Hz)
+        const pingOsc = ctx.createOscillator();
+        pingOsc.type = "sine";
+        pingOsc.frequency.setValueAtTime?.(2093, now + 0.015);
+        pingOsc.frequency.exponentialRampToValueAtTime?.(1864, now + 0.6);
+
+        const pingFilter = ctx.createBiquadFilter();
+        pingFilter.type = "bandpass";
+        pingFilter.frequency.setValueAtTime?.(2093, now + 0.015);
+        pingFilter.Q.setValueAtTime?.(14, now);
+
+        const pingGain = ctx.createGain();
+        pingGain.gain.setValueAtTime?.(0.0001, now + 0.015);
+        pingGain.gain.linearRampToValueAtTime?.(0.22, now + 0.02);
+        pingGain.gain.exponentialRampToValueAtTime?.(0.0001, now + 0.65);
+
+        pingOsc.connect(pingFilter);
+        pingFilter.connect(pingGain);
+        pingGain.connect(dest);
+        pingOsc.start(now + 0.015);
+        pingOsc.stop(now + 0.68);
+      }
+    } catch {}
+  }
+
+  /**
+   * 7. playLiquidationZap()
+   * High-voltage electrostatic arc & breaker trip sound on forced liquidations.
+   */
+  playLiquidationZap() {
+    if (this.muted) return;
+    const ctx = this.getContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const dest = this.masterGain || ctx.destination;
+
+    try {
+      const noise = this.getOrCreateNoiseBuffer();
+      if (noise && typeof ctx.createBufferSource === "function") {
+        // High voltage noise arc
+        const noiseSrc = ctx.createBufferSource();
+        noiseSrc.buffer = noise;
+        const filter = ctx.createBiquadFilter();
+        filter.type = "bandpass";
+        filter.frequency.setValueAtTime?.(4200, now);
+        filter.frequency.exponentialRampToValueAtTime?.(800, now + 0.09);
+        filter.Q.setValueAtTime?.(5.0, now);
+
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime?.(0.35, now);
+        gain.gain.exponentialRampToValueAtTime?.(0.0001, now + 0.09);
+
+        noiseSrc.connect(filter);
+        filter.connect(gain);
+        gain.connect(dest);
+        noiseSrc.start(now);
+        noiseSrc.stop(now + 0.1);
+      }
+
+      if (typeof ctx.createOscillator === "function") {
+        const osc = ctx.createOscillator();
+        osc.type = "sawtooth";
+        osc.frequency.setValueAtTime?.(580, now);
+        osc.frequency.exponentialRampToValueAtTime?.(85, now + 0.12);
+
+        const oscGain = ctx.createGain();
+        oscGain.gain.setValueAtTime?.(0.22, now);
+        oscGain.gain.exponentialRampToValueAtTime?.(0.0001, now + 0.12);
+
+        osc.connect(oscGain);
+        oscGain.connect(dest);
+        osc.start(now);
+        osc.stop(now + 0.13);
+      }
+    } catch {}
+  }
+
+  /**
    * Gracefully close AudioContext
    */
   async close() {
@@ -825,6 +934,8 @@ export const playTickerTick = (direction) =>
 export const playCommandGo = () => soundEngine.playCommandGo();
 export const playVolatilityAlert = (level) =>
   soundEngine.playVolatilityAlert(level);
+export const playWhalePing = (val) => soundEngine.playWhalePing(val);
+export const playLiquidationZap = () => soundEngine.playLiquidationZap();
 export const toggleMute = () => soundEngine.toggleMute();
 export const isMuted = () => soundEngine.isMuted();
 export const setMuted = (muted) => soundEngine.setMuted(muted);

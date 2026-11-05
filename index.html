@@ -238,6 +238,105 @@
         border-radius: 4px;
       }
 
+      .tape-whale {
+        color: var(--cyan);
+        background: rgba(0, 216, 255, 0.14);
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-weight: 700;
+      }
+
+      .tape-liq {
+        color: var(--red);
+        background: rgba(255, 51, 68, 0.18);
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-weight: 800;
+        border: 1px solid var(--red);
+      }
+
+      .tier-kraken {
+        background: rgba(255, 51, 68, 0.28);
+        color: var(--red);
+        border: 1px solid var(--red);
+        font-weight: 900;
+      }
+
+      .tier-megalodon {
+        background: rgba(255, 153, 0, 0.22);
+        color: var(--amber);
+        border: 1px solid var(--amber);
+        font-weight: 800;
+      }
+
+      .tier-whale {
+        background: rgba(0, 216, 255, 0.2);
+        color: var(--cyan);
+        border: 1px solid var(--cyan);
+        font-weight: 700;
+      }
+
+      .tier-dolphin {
+        background: rgba(0, 255, 102, 0.15);
+        color: var(--green);
+        border: 1px solid var(--green);
+      }
+
+      .filter-group {
+        display: flex;
+        gap: 6px;
+      }
+
+      .filter-btn {
+        background: var(--crt-elevated);
+        border: 1px solid var(--crt-border);
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        font-weight: 700;
+        padding: 4px 10px;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .filter-btn.active {
+        background: rgba(0, 216, 255, 0.18);
+        border-color: var(--cyan);
+        color: var(--cyan);
+      }
+
+      .liq-bar-wrap {
+        height: 24px;
+        background: #162032;
+        border-radius: 4px;
+        display: flex;
+        overflow: hidden;
+        font-weight: 800;
+        font-size: 0.75rem;
+        text-align: center;
+        line-height: 24px;
+      }
+
+      .liq-bar-long {
+        background: var(--red);
+        color: white;
+        transition: width 0.4s ease;
+      }
+
+      .liq-bar-short {
+        background: var(--green);
+        color: black;
+        transition: width 0.4s ease;
+      }
+
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.7rem;
+      }
+
       /* Bloomberg Command Bar */
       .command-bar-section {
         background: var(--crt-surface);

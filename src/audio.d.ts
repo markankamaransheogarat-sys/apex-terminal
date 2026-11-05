@@ -54,6 +54,8 @@ export class ApexSoundEngine {
   playTickerTick(direction: TickerDirection): void;
   playCommandGo(): void;
   playVolatilityAlert(level?: VolatilityLevel): void;
+  playWhalePing(valueUsd?: number): void;
+  playLiquidationZap(): void;
 
   toggleMute(): boolean;
   isMuted(): boolean;
@@ -71,6 +73,8 @@ export declare function playTerminalKey(char?: string): void;
 export declare function playTickerTick(direction: TickerDirection): void;
 export declare function playCommandGo(): void;
 export declare function playVolatilityAlert(level?: VolatilityLevel): void;
+export declare function playWhalePing(valueUsd?: number): void;
+export declare function playLiquidationZap(): void;
 export declare function toggleMute(): boolean;
 export declare function isMuted(): boolean;
 export declare function setMuted(muted: boolean): boolean;

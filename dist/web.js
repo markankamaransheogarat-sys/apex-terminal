@@ -1178,6 +1178,283 @@ class ReferenceData {
   }
 }
 
+// src/feeds/whale-stream.ts
+class WhaleStreamManager {
+  WebSocketClass;
+  static STREAMS = [
+    "btcusdt@aggTrade",
+    "ethusdt@aggTrade",
+    "solusdt@aggTrade",
+    "bnbusdt@aggTrade",
+    "xrpusdt@aggTrade",
+    "dogeusdt@aggTrade",
+    "tonusdt@aggTrade",
+    "suiusdt@aggTrade",
+    "pepeusdt@aggTrade"
+  ];
+  tradeWs = null;
+  liqWs = null;
+  whaleTrades = [];
+  liquidations = [];
+  metrics = {
+    totalWhaleBuyVolumeUsd: 0,
+    totalWhaleSellVolumeUsd: 0,
+    netWhaleDeltaUsd: 0,
+    totalLiquidationsLongUsd: 0,
+    totalLiquidationsShortUsd: 0,
+    totalLiquidationsCount: 0
+  };
+  whaleListeners = [];
+  liqListeners = [];
+  isDestroyed = false;
+  constructor(WebSocketClass = typeof WebSocket !== "undefined" ? WebSocket : null) {
+    this.WebSocketClass = WebSocketClass;
+  }
+  onWhaleTrade(fn) {
+    this.whaleListeners.push(fn);
+    return () => {
+      this.whaleListeners = this.whaleListeners.filter((l) => l !== fn);
+    };
+  }
+  onLiquidation(fn) {
+    this.liqListeners.push(fn);
+    return () => {
+      this.liqListeners = this.liqListeners.filter((l) => l !== fn);
+    };
+  }
+  getWhaleTrades() {
+    return [...this.whaleTrades];
+  }
+  getLiquidations() {
+    return [...this.liquidations];
+  }
+  getMetrics() {
+    return { ...this.metrics };
+  }
+  connect() {
+    if (!this.WebSocketClass)
+      return;
+    this.connectTradeStream();
+    this.connectLiquidationStream();
+  }
+  connectTradeStream() {
+    if (this.isDestroyed || !this.WebSocketClass)
+      return;
+    const streamUrl = `wss://stream.binance.com:9443/stream?streams=${WhaleStreamManager.STREAMS.join("/")}`;
+    try {
+      this.tradeWs = new this.WebSocketClass(streamUrl);
+      this.tradeWs.onmessage = (event) => {
+        try {
+          const raw = JSON.parse(typeof event.data === "string" ? event.data : event.data.toString());
+          const d = raw.data;
+          if (!d || !d.p || !d.q)
+            return;
+          const price = parseFloat(d.p);
+          const quantity = parseFloat(d.q);
+          const valueUsd = price * quantity;
+          if (valueUsd >= 50000) {
+            const side = d.m ? "SELL" : "BUY";
+            const symbol = (d.s || "").toUpperCase();
+            const asset = symbol.replace("USDT", "");
+            let tier = "DOLPHIN";
+            if (valueUsd >= 1e6)
+              tier = "KRAKEN";
+            else if (valueUsd >= 500000)
+              tier = "MEGALODON";
+            else if (valueUsd >= 1e5)
+              tier = "WHALE";
+            const trade = {
+              id: `wh-${d.a || Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+              symbol,
+              asset,
+              side,
+              price,
+              quantity,
+              valueUsd,
+              tier,
+              timestamp: d.T || Date.now()
+            };
+            this.whaleTrades.unshift(trade);
+            if (this.whaleTrades.length > 100)
+              this.whaleTrades.pop();
+            if (side === "BUY") {
+              this.metrics.totalWhaleBuyVolumeUsd += valueUsd;
+            } else {
+              this.metrics.totalWhaleSellVolumeUsd += valueUsd;
+            }
+            this.metrics.netWhaleDeltaUsd = this.metrics.totalWhaleBuyVolumeUsd - this.metrics.totalWhaleSellVolumeUsd;
+            this.whaleListeners.forEach((fn) => {
+              try {
+                fn(trade);
+              } catch {}
+            });
+          }
+        } catch {}
+      };
+      this.tradeWs.onclose = () => {
+        if (!this.isDestroyed) {
+          setTimeout(() => this.connectTradeStream(), 3000);
+        }
+      };
+      this.tradeWs.onerror = () => {
+        try {
+          this.tradeWs?.close();
+        } catch {}
+      };
+    } catch (e) {
+      console.warn("Trade stream error:", e);
+    }
+  }
+  connectLiquidationStream() {
+    if (this.isDestroyed || !this.WebSocketClass)
+      return;
+    const streamUrl = "wss://fstream.binance.com/ws/!forceOrder@arr";
+    try {
+      this.liqWs = new this.WebSocketClass(streamUrl);
+      this.liqWs.onmessage = (event) => {
+        try {
+          const raw = JSON.parse(typeof event.data === "string" ? event.data : event.data.toString());
+          const o = raw.o;
+          if (!o)
+            return;
+          const price = parseFloat(o.ap || o.p || "0");
+          const quantity = parseFloat(o.q || "0");
+          const valueUsd = price * quantity;
+          const symbol = (o.s || "").toUpperCase();
+          const asset = symbol.replace("USDT", "");
+          const side = o.S === "BUY" ? "SHORT" : "LONG";
+          const liq = {
+            id: `liq-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            symbol,
+            asset,
+            side,
+            price,
+            quantity,
+            valueUsd,
+            timestamp: o.T || Date.now()
+          };
+          this.liquidations.unshift(liq);
+          if (this.liquidations.length > 100)
+            this.liquidations.pop();
+          if (side === "LONG") {
+            this.metrics.totalLiquidationsLongUsd += valueUsd;
+          } else {
+            this.metrics.totalLiquidationsShortUsd += valueUsd;
+          }
+          this.metrics.totalLiquidationsCount++;
+          this.liqListeners.forEach((fn) => {
+            try {
+              fn(liq);
+            } catch {}
+          });
+        } catch {}
+      };
+      this.liqWs.onclose = () => {
+        if (!this.isDestroyed) {
+          setTimeout(() => this.connectLiquidationStream(), 4000);
+        }
+      };
+      this.liqWs.onerror = () => {
+        try {
+          this.liqWs?.close();
+        } catch {}
+      };
+    } catch (e) {
+      console.warn("Liquidation stream error:", e);
+    }
+  }
+  disconnect() {
+    this.isDestroyed = true;
+    try {
+      this.tradeWs?.close();
+    } catch {}
+    try {
+      this.liqWs?.close();
+    } catch {}
+    this.tradeWs = null;
+    this.liqWs = null;
+  }
+}
+
+// src/feeds/onchain-vitality.ts
+class OnChainVitalityService {
+  fetchImpl;
+  static OI_SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "DOGEUSDT"
+  ];
+  cachedMempool = null;
+  cachedOi = new Map;
+  lastUpdate = 0;
+  constructor(fetchImpl = typeof fetch !== "undefined" ? fetch : null) {
+    this.fetchImpl = fetchImpl;
+  }
+  async fetchMempoolFees() {
+    if (!this.fetchImpl)
+      return null;
+    try {
+      const res = await this.fetchImpl("https://mempool.space/api/v1/fees/recommended", {
+        headers: { Accept: "application/json" }
+      });
+      if (!res.ok)
+        return this.cachedMempool;
+      const data = await res.json();
+      this.cachedMempool = {
+        fastestFee: data.fastestFee ?? 10,
+        halfHourFee: data.halfHourFee ?? 8,
+        hourFee: data.hourFee ?? 6,
+        minimumFee: data.minimumFee ?? 1,
+        timestamp: Date.now()
+      };
+      return this.cachedMempool;
+    } catch {
+      return this.cachedMempool;
+    }
+  }
+  async fetchOpenInterest(currentPrices) {
+    if (!this.fetchImpl)
+      return this.cachedOi;
+    for (const sym of OnChainVitalityService.OI_SYMBOLS) {
+      try {
+        const res = await this.fetchImpl(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${sym}`, {
+          headers: { Accept: "application/json" }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const coins = parseFloat(data.openInterest || "0");
+          const price = currentPrices.get(sym) || (sym === "BTCUSDT" ? 94000 : sym === "ETHUSDT" ? 3400 : 200);
+          const usd = coins * price;
+          const asset = sym.replace("USDT", "");
+          this.cachedOi.set(sym, {
+            symbol: sym,
+            asset,
+            openInterestCoins: coins,
+            openInterestUsd: usd,
+            timestamp: data.time || Date.now()
+          });
+        }
+      } catch {}
+    }
+    this.lastUpdate = Date.now();
+    return this.cachedOi;
+  }
+  getSnapshot() {
+    let totalOi = 0;
+    this.cachedOi.forEach((item) => {
+      totalOi += item.openInterestUsd;
+    });
+    return {
+      mempool: this.cachedMempool,
+      openInterest: new Map(this.cachedOi),
+      totalTrackedOiUsd: totalOi,
+      lastUpdated: this.lastUpdate
+    };
+  }
+}
+
 // src/audio.js
 var STORAGE_KEY = "apex_terminal_audio_muted";
 var VOLUME_KEY = "apex_terminal_audio_volume";
@@ -1661,6 +1938,91 @@ class ApexSoundEngine {
       state: this.ctx ? this.ctx.state || "running" : "uninitialized"
     };
   }
+  playWhalePing(valueUsd = 1e5) {
+    if (this.muted)
+      return;
+    const ctx = this.getContext();
+    if (!ctx)
+      return;
+    const now = ctx.currentTime;
+    const dest = this.masterGain || ctx.destination;
+    try {
+      if (typeof ctx.createOscillator === "function") {
+        const subOsc = ctx.createOscillator();
+        subOsc.type = "sine";
+        subOsc.frequency.setValueAtTime?.(48, now);
+        subOsc.frequency.exponentialRampToValueAtTime?.(28, now + 0.85);
+        const subGain = ctx.createGain();
+        const baseGain = Math.min(0.65, 0.28 + valueUsd / 1e6 * 0.2);
+        subGain.gain.setValueAtTime?.(0.0001, now);
+        subGain.gain.linearRampToValueAtTime?.(baseGain, now + 0.02);
+        subGain.gain.exponentialRampToValueAtTime?.(0.0001, now + 0.9);
+        subOsc.connect(subGain);
+        subGain.connect(dest);
+        subOsc.start(now);
+        subOsc.stop(now + 0.92);
+        const pingOsc = ctx.createOscillator();
+        pingOsc.type = "sine";
+        pingOsc.frequency.setValueAtTime?.(2093, now + 0.015);
+        pingOsc.frequency.exponentialRampToValueAtTime?.(1864, now + 0.6);
+        const pingFilter = ctx.createBiquadFilter();
+        pingFilter.type = "bandpass";
+        pingFilter.frequency.setValueAtTime?.(2093, now + 0.015);
+        pingFilter.Q.setValueAtTime?.(14, now);
+        const pingGain = ctx.createGain();
+        pingGain.gain.setValueAtTime?.(0.0001, now + 0.015);
+        pingGain.gain.linearRampToValueAtTime?.(0.22, now + 0.02);
+        pingGain.gain.exponentialRampToValueAtTime?.(0.0001, now + 0.65);
+        pingOsc.connect(pingFilter);
+        pingFilter.connect(pingGain);
+        pingGain.connect(dest);
+        pingOsc.start(now + 0.015);
+        pingOsc.stop(now + 0.68);
+      }
+    } catch {}
+  }
+  playLiquidationZap() {
+    if (this.muted)
+      return;
+    const ctx = this.getContext();
+    if (!ctx)
+      return;
+    const now = ctx.currentTime;
+    const dest = this.masterGain || ctx.destination;
+    try {
+      const noise = this.getOrCreateNoiseBuffer();
+      if (noise && typeof ctx.createBufferSource === "function") {
+        const noiseSrc = ctx.createBufferSource();
+        noiseSrc.buffer = noise;
+        const filter = ctx.createBiquadFilter();
+        filter.type = "bandpass";
+        filter.frequency.setValueAtTime?.(4200, now);
+        filter.frequency.exponentialRampToValueAtTime?.(800, now + 0.09);
+        filter.Q.setValueAtTime?.(5, now);
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime?.(0.35, now);
+        gain.gain.exponentialRampToValueAtTime?.(0.0001, now + 0.09);
+        noiseSrc.connect(filter);
+        filter.connect(gain);
+        gain.connect(dest);
+        noiseSrc.start(now);
+        noiseSrc.stop(now + 0.1);
+      }
+      if (typeof ctx.createOscillator === "function") {
+        const osc = ctx.createOscillator();
+        osc.type = "sawtooth";
+        osc.frequency.setValueAtTime?.(580, now);
+        osc.frequency.exponentialRampToValueAtTime?.(85, now + 0.12);
+        const oscGain = ctx.createGain();
+        oscGain.gain.setValueAtTime?.(0.22, now);
+        oscGain.gain.exponentialRampToValueAtTime?.(0.0001, now + 0.12);
+        osc.connect(oscGain);
+        oscGain.connect(dest);
+        osc.start(now);
+        osc.stop(now + 0.13);
+      }
+    } catch {}
+  }
   async close() {
     if (this.ctx && typeof this.ctx.close === "function") {
       try {
@@ -1677,6 +2039,8 @@ var soundEngine = new ApexSoundEngine;
 var playTerminalKey = (char) => soundEngine.playTerminalKey(char);
 var playTickerTick = (direction) => soundEngine.playTickerTick(direction);
 var playCommandGo = () => soundEngine.playCommandGo();
+var playWhalePing = (val) => soundEngine.playWhalePing(val);
+var playLiquidationZap = () => soundEngine.playLiquidationZap();
 var toggleMute = () => soundEngine.toggleMute();
 var isMuted = () => soundEngine.isMuted();
 
@@ -1687,6 +2051,8 @@ var CALIBRATED_RETURNS = ReferenceData.getCalibratedReturns();
 class ApexWebTerminal {
   binanceWs;
   restService;
+  whaleStream;
+  onChainService;
   tickers = new Map;
   prevPrices = new Map;
   fundingRates = [];
@@ -1694,11 +2060,15 @@ class ApexWebTerminal {
   portfolio = DEFAULT_PORTFOLIO;
   activeScreen = "MARKET";
   selectedStressId = "CRYPTO_CRASH_20";
+  whaleFilter = "ALL";
   constructor() {
+    const wsConstructor = typeof WebSocket !== "undefined" ? WebSocket : undefined;
     this.binanceWs = new BinanceWsFeedManager({
-      webSocketConstructor: typeof WebSocket !== "undefined" ? WebSocket : undefined
+      webSocketConstructor: wsConstructor
     });
     this.restService = new RestFallbackService;
+    this.whaleStream = new WhaleStreamManager(wsConstructor);
+    this.onChainService = new OnChainVitalityService;
     this.initDOM();
     this.bindEvents();
     this.startFeeds();
@@ -1739,13 +2109,16 @@ class ApexWebTerminal {
         <section class="command-bar-section">
           <div class="command-prompt-box">
             <span class="command-prefix">APEX:&gt;</span>
-            <input type="text" id="cmd-input" class="command-input" placeholder="Enter command (e.g. BTC &lt;GO&gt;, RISK &lt;GO&gt;, FUND &lt;GO&gt;)..." autocomplete="off" spellcheck="false" />
+            <input type="text" id="cmd-input" class="command-input" placeholder="Enter command (e.g. WHALE &lt;GO&gt;, LIQ &lt;GO&gt;, RISK &lt;GO&gt;, BTC &lt;GO&gt;)..." autocomplete="off" spellcheck="false" />
             <button id="btn-go" class="btn-go">&lt;GO&gt;</button>
           </div>
           <div class="quick-commands">
             <button class="cmd-chip active" data-cmd="MARKET">MARKET &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="WHALE">\uD83D\uDC0B WHALE &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="LIQ">⚡ LIQ &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="RISK">RISK &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="FUND">FUND &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="MACRO">MACRO &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="PORT">PORT &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="HELP">HELP &lt;GO&gt;</button>
           </div>
@@ -1761,6 +2134,8 @@ class ApexWebTerminal {
             <span>[F2: MARKET]</span>
             <span>[F3: RISK]</span>
             <span>[F4: FUND]</span>
+            <span>[F6: WHALE]</span>
+            <span>[F7: LIQ]</span>
             <span>[F8: PORT]</span>
           </div>
           <div class="footer-right">
@@ -1813,6 +2188,12 @@ class ApexWebTerminal {
       } else if (e.key === "F4") {
         e.preventDefault();
         this.executeCommand("FUND <GO>");
+      } else if (e.key === "F6") {
+        e.preventDefault();
+        this.executeCommand("WHALE <GO>");
+      } else if (e.key === "F7") {
+        e.preventDefault();
+        this.executeCommand("LIQ <GO>");
       } else if (e.key === "F8") {
         e.preventDefault();
         this.executeCommand("PORT <GO>");
@@ -1826,10 +2207,16 @@ class ApexWebTerminal {
     playCommandGo();
     if (cleaned === "MARKET" || cleaned === "MKT") {
       this.activeScreen = "MARKET";
+    } else if (cleaned === "WHALE" || cleaned === "WHALES" || cleaned === "FLOW") {
+      this.activeScreen = "WHALE";
+    } else if (cleaned === "LIQ" || cleaned === "LIQUIDATIONS" || cleaned === "REKT") {
+      this.activeScreen = "LIQ";
     } else if (cleaned === "RISK" || cleaned === "ALADDIN" || cleaned === "VAR") {
       this.activeScreen = "RISK";
     } else if (cleaned === "FUND" || cleaned === "FUNDING" || cleaned === "PERP") {
       this.activeScreen = "FUNDING";
+    } else if (cleaned === "MACRO" || cleaned === "GAS" || cleaned === "MEMPOOL") {
+      this.activeScreen = "MACRO";
     } else if (cleaned === "PORT" || cleaned === "PORTFOLIO" || cleaned === "POS") {
       this.activeScreen = "PORT";
     } else if (cleaned === "HELP" || cleaned === "INDEX") {
@@ -1876,19 +2263,38 @@ class ApexWebTerminal {
       this.updateWsStatus(state);
     });
     this.binanceWs.connect();
+    this.whaleStream.onWhaleTrade((trade) => {
+      playWhalePing(trade.valueUsd);
+      this.updateTickerTape();
+      if (this.activeScreen === "WHALE") {
+        this.renderWhaleLive(trade);
+      }
+    });
+    this.whaleStream.onLiquidation((liq) => {
+      playLiquidationZap();
+      this.updateTickerTape();
+      if (this.activeScreen === "LIQ") {
+        this.renderLiquidationLive(liq);
+      }
+    });
+    this.whaleStream.connect();
     FundingRateCalculator.fetchLiveFundingRates().then((rates) => {
       this.fundingRates = rates;
       if (this.activeScreen === "FUNDING")
         this.render();
-    }).catch((e) => console.warn("Funding fetch notice:", e));
+    }).catch(() => {});
     this.restService.fetchFearAndGreed().then((data) => {
       this.fearGreed = data;
-      if (this.activeScreen === "MARKET")
+      if (this.activeScreen === "MARKET" || this.activeScreen === "MACRO")
         this.render();
-    }).catch((e) => console.warn("Fear & Greed notice:", e));
+    }).catch(() => {});
+    this.onChainService.fetchMempoolFees();
+    this.onChainService.fetchOpenInterest(this.prevPrices);
     setInterval(() => {
       FundingRateCalculator.fetchLiveFundingRates().then((r) => this.fundingRates = r);
-    }, 60000);
+      this.onChainService.fetchMempoolFees();
+      this.onChainService.fetchOpenInterest(this.prevPrices);
+    }, 45000);
   }
   updateWsStatus(state) {
     const el = document.getElementById("ws-status");
@@ -1896,7 +2302,7 @@ class ApexWebTerminal {
     if (!el || !txt)
       return;
     el.className = `feed-status status-${state.toLowerCase()}`;
-    txt.textContent = `BINANCE WS: ${state}`;
+    txt.textContent = `LIVE WS: ${state}`;
   }
   startClock() {
     const clockEl = document.getElementById("system-clock");
@@ -1912,6 +2318,22 @@ class ApexWebTerminal {
     if (!tape)
       return;
     const items = [];
+    const recentWhale = this.whaleStream.getWhaleTrades()[0];
+    if (recentWhale) {
+      items.push(`
+        <span class="tape-tick tape-whale">
+          \uD83D\uDC0B <strong>WHALE ${recentWhale.side}</strong>: ${recentWhale.asset} $${Math.round(recentWhale.valueUsd).toLocaleString()} @ $${recentWhale.price.toLocaleString()}
+        </span>
+      `);
+    }
+    const recentLiq = this.whaleStream.getLiquidations()[0];
+    if (recentLiq) {
+      items.push(`
+        <span class="tape-tick tape-liq">
+          ⚡ <strong>REKT ${recentLiq.side}</strong>: ${recentLiq.asset} $${Math.round(recentLiq.valueUsd).toLocaleString()}
+        </span>
+      `);
+    }
     const keys = [
       "BTCUSDT",
       "ETHUSDT",
@@ -1937,7 +2359,7 @@ class ApexWebTerminal {
       }
     });
     if (this.fearGreed) {
-      items.unshift(`
+      items.push(`
         <span class="tape-tick tape-highlight">
           <strong>FEAR &amp; GREED</strong>: ${this.fearGreed.value} (${this.fearGreed.valueClassification.toUpperCase()})
         </span>
@@ -1953,10 +2375,16 @@ class ApexWebTerminal {
       return;
     if (this.activeScreen === "MARKET") {
       this.renderMarketScreen(body);
+    } else if (this.activeScreen === "WHALE") {
+      this.renderWhaleScreen(body);
+    } else if (this.activeScreen === "LIQ") {
+      this.renderLiquidationScreen(body);
     } else if (this.activeScreen === "RISK") {
       this.renderRiskScreen(body);
     } else if (this.activeScreen === "FUNDING") {
       this.renderFundingScreen(body);
+    } else if (this.activeScreen === "MACRO") {
+      this.renderMacroScreen(body);
     } else if (this.activeScreen === "PORT") {
       this.renderPortfolioScreen(body);
     } else if (this.activeScreen === "HELP") {
@@ -2044,6 +2472,282 @@ class ApexWebTerminal {
       chgCell.className = `td-chg ${ticker.priceChangePercent24h >= 0 ? "text-green" : "text-red"}`;
     }
   }
+  renderWhaleScreen(container) {
+    const metrics = this.whaleStream.getMetrics();
+    const trades = this.whaleStream.getWhaleTrades().filter((t) => {
+      if (this.whaleFilter === "100K")
+        return t.valueUsd >= 1e5;
+      if (this.whaleFilter === "500K")
+        return t.valueUsd >= 500000;
+      if (this.whaleFilter === "1M")
+        return t.valueUsd >= 1e6;
+      return true;
+    });
+    const isNetPositive = metrics.netWhaleDeltaUsd >= 0;
+    container.innerHTML = `
+      <div class="terminal-screen screen-whale">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">\uD83D\uDC0B REAL-TIME WHALE RADAR &amp; INSTITUTIONAL BLOCK FLOW</h2>
+            <span class="screen-subtitle">LIVE WEBSOCKET AGGREGATED PRINTS &ge; $50K WITH CUMULATIVE VOLUME DELTA (CVD)</span>
+          </div>
+          <div class="filter-group">
+            <button class="filter-btn ${this.whaleFilter === "ALL" ? "active" : ""}" data-filter="ALL">&ge; $50K</button>
+            <button class="filter-btn ${this.whaleFilter === "100K" ? "active" : ""}" data-filter="100K">&ge; $100K</button>
+            <button class="filter-btn ${this.whaleFilter === "500K" ? "active" : ""}" data-filter="500K">&ge; $500K</button>
+            <button class="filter-btn ${this.whaleFilter === "1M" ? "active" : ""}" data-filter="1M">&ge; $1M (KRAKEN)</button>
+          </div>
+        </div>
+
+        <!-- Whale Metrics KPIs -->
+        <div class="aladdin-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">WHALE BUY VOLUME</span>
+            <span class="kpi-val text-green">$${Math.round(metrics.totalWhaleBuyVolumeUsd).toLocaleString()}</span>
+            <span class="kpi-sub">AGGRESSIVE TAKER BUYS</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">WHALE SELL VOLUME</span>
+            <span class="kpi-val text-red">$${Math.round(metrics.totalWhaleSellVolumeUsd).toLocaleString()}</span>
+            <span class="kpi-sub">AGGRESSIVE TAKER DUMPS</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">CUMULATIVE WHALE DELTA (CVD)</span>
+            <span class="kpi-val ${isNetPositive ? "text-green" : "text-red"}">
+              ${isNetPositive ? "+" : ""}$${Math.round(metrics.netWhaleDeltaUsd).toLocaleString()}
+            </span>
+            <span class="kpi-sub">${isNetPositive ? "NET INSTITUTIONAL ACCUMULATION" : "NET INSTITUTIONAL DISTRIBUTION"}</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">WHALE ACTIVITY PULSE</span>
+            <span class="kpi-val text-cyan">${trades.length} PRINTS</span>
+            <span class="kpi-sub">LIVE TAPE BUFFER</span>
+          </div>
+        </div>
+
+        <!-- Live Whale Table -->
+        <div class="market-matrix-table-wrap mt-3">
+          <table class="terminal-table" id="whale-table">
+            <thead>
+              <tr>
+                <th>TIME</th>
+                <th>ASSET</th>
+                <th>ACTION</th>
+                <th>NOTIONAL VALUE</th>
+                <th>SIZE</th>
+                <th>EXECUTION PRICE</th>
+                <th>WHALE TIER</th>
+              </tr>
+            </thead>
+            <tbody id="whale-tbody">
+              ${trades.length === 0 ? `<tr><td colspan="7" class="text-center">Listening for block trades &ge; $50,000 on Binance...</td></tr>` : trades.map((t) => this.renderWhaleRow(t)).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    document.querySelectorAll(".filter-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const filter = e.currentTarget.getAttribute("data-filter");
+        if (filter) {
+          this.whaleFilter = filter;
+          this.render();
+        }
+      });
+    });
+  }
+  renderWhaleRow(t) {
+    const timeStr = new Date(t.timestamp).toLocaleTimeString();
+    const sideClass = t.side === "BUY" ? "text-green" : "text-red";
+    const tierBadge = t.tier === "KRAKEN" ? "tier-kraken" : t.tier === "MEGALODON" ? "tier-megalodon" : t.tier === "WHALE" ? "tier-whale" : "tier-dolphin";
+    return `
+      <tr>
+        <td class="text-dim">${timeStr}</td>
+        <td><strong>${t.asset}</strong>/USDT</td>
+        <td class="${sideClass}"><strong>${t.side}</strong></td>
+        <td class="${sideClass}">$${Math.round(t.valueUsd).toLocaleString()}</td>
+        <td>${t.quantity.toLocaleString(undefined, { maximumFractionDigits: 3 })} ${t.asset}</td>
+        <td>$${t.price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+        <td><span class="badge ${tierBadge}">● ${t.tier}</span></td>
+      </tr>
+    `;
+  }
+  renderWhaleLive(trade) {
+    const tbody = document.getElementById("whale-tbody");
+    if (!tbody)
+      return;
+    if (this.whaleFilter === "100K" && trade.valueUsd < 1e5)
+      return;
+    if (this.whaleFilter === "500K" && trade.valueUsd < 500000)
+      return;
+    if (this.whaleFilter === "1M" && trade.valueUsd < 1e6)
+      return;
+    const rowHtml = this.renderWhaleRow(trade);
+    tbody.insertAdjacentHTML("afterbegin", rowHtml);
+    if (tbody.children.length > 50) {
+      tbody.removeChild(tbody.lastChild);
+    }
+  }
+  renderLiquidationScreen(container) {
+    const metrics = this.whaleStream.getMetrics();
+    const liqs = this.whaleStream.getLiquidations();
+    const totalLiqUsd = metrics.totalLiquidationsLongUsd + metrics.totalLiquidationsShortUsd;
+    const longPct = totalLiqUsd > 0 ? metrics.totalLiquidationsLongUsd / totalLiqUsd * 100 : 50;
+    const shortPct = totalLiqUsd > 0 ? metrics.totalLiquidationsShortUsd / totalLiqUsd * 100 : 50;
+    container.innerHTML = `
+      <div class="terminal-screen screen-liq">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">⚡ REAL-TIME LIQUIDATION RADAR &amp; REKT TAPE</h2>
+            <span class="screen-subtitle">BINANCE FUTURES PUBLIC !forceOrder@arr FORCED DELEVERAGING STREAM</span>
+          </div>
+          <span class="terminal-badge badge-aladdin">LIVE LIQUIDATIONS ENGINE</span>
+        </div>
+
+        <div class="aladdin-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">TOTAL FORCED LIQUIDATIONS</span>
+            <span class="kpi-val text-amber">$${Math.round(totalLiqUsd).toLocaleString()}</span>
+            <span class="kpi-sub">${metrics.totalLiquidationsCount} REKT ACCOUNTS</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">LONGS LIQUIDATED (BULL BLEED)</span>
+            <span class="kpi-val text-red">$${Math.round(metrics.totalLiquidationsLongUsd).toLocaleString()}</span>
+            <span class="kpi-sub">${longPct.toFixed(1)}% OF TOTAL REKT</span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">SHORTS LIQUIDATED (SHORT SQUEEZE)</span>
+            <span class="kpi-val text-green">$${Math.round(metrics.totalLiquidationsShortUsd).toLocaleString()}</span>
+            <span class="kpi-sub">${shortPct.toFixed(1)}% OF TOTAL REKT</span>
+          </div>
+        </div>
+
+        <!-- Long vs Short Liquidation Ratio Bar -->
+        <div class="terminal-section mt-3">
+          <span class="section-title">LIQUIDATION RATIO BREAKDOWN</span>
+          <div class="liq-bar-wrap mt-2">
+            <div class="liq-bar-long" style="width: ${longPct}%;">LONGS ${longPct.toFixed(0)}%</div>
+            <div class="liq-bar-short" style="width: ${shortPct}%;">SHORTS ${shortPct.toFixed(0)}%</div>
+          </div>
+        </div>
+
+        <!-- Live Liquidations Table -->
+        <div class="market-matrix-table-wrap mt-3">
+          <table class="terminal-table">
+            <thead>
+              <tr>
+                <th>TIME</th>
+                <th>CONTRACT</th>
+                <th>REKT SIDE</th>
+                <th>LIQUIDATED VALUE</th>
+                <th>SIZE</th>
+                <th>BANKRUPTCY PRICE</th>
+              </tr>
+            </thead>
+            <tbody id="liq-tbody">
+              ${liqs.length === 0 ? `<tr><td colspan="6" class="text-center">Connected to Binance Futures forced liquidation feed. Awaiting liquidation events...</td></tr>` : liqs.map((l) => this.renderLiquidationRow(l)).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+  renderLiquidationRow(l) {
+    const timeStr = new Date(l.timestamp).toLocaleTimeString();
+    const sideClass = l.side === "LONG" ? "text-red" : "text-green";
+    return `
+      <tr class="row-flash-liq">
+        <td class="text-dim">${timeStr}</td>
+        <td><strong>${l.asset}</strong>USDT PERP</td>
+        <td class="${sideClass}"><strong>⚡ ${l.side} REKT</strong></td>
+        <td class="${sideClass}">$${Math.round(l.valueUsd).toLocaleString()}</td>
+        <td>${l.quantity.toLocaleString(undefined, { maximumFractionDigits: 3 })} ${l.asset}</td>
+        <td>$${l.price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+      </tr>
+    `;
+  }
+  renderLiquidationLive(liq) {
+    const tbody = document.getElementById("liq-tbody");
+    if (!tbody)
+      return;
+    const rowHtml = this.renderLiquidationRow(liq);
+    tbody.insertAdjacentHTML("afterbegin", rowHtml);
+    if (tbody.children.length > 50) {
+      tbody.removeChild(tbody.lastChild);
+    }
+  }
+  renderMacroScreen(container) {
+    const snapshot = this.onChainService.getSnapshot();
+    const mempool = snapshot.mempool;
+    container.innerHTML = `
+      <div class="terminal-screen screen-macro">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">\uD83C\uDF10 ON-CHAIN VITALITY &amp; GLOBAL MACRO PULSE</h2>
+            <span class="screen-subtitle">LIVE BITCOIN MEMPOOL FEES (MEMPOOL.SPACE) &amp; BINANCE FUTURES OPEN INTEREST</span>
+          </div>
+        </div>
+
+        <!-- Mempool & Fees -->
+        <section class="terminal-section">
+          <span class="section-title">BITCOIN MEMPOOL TRANSACTION FEES (SAT/VB)</span>
+          <p class="section-desc">Recommended satoshis per virtual byte for next block confirmation.</p>
+
+          <div class="aladdin-kpi-grid mt-2">
+            <div class="kpi-card">
+              <span class="kpi-label">⚡ HIGH PRIORITY (NEXT BLOCK)</span>
+              <span class="kpi-val text-green">${mempool ? mempool.fastestFee : 6} sat/vB</span>
+              <span class="kpi-sub">~10 MINUTE INCLUSION</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">\uD83D\uDE97 MEDIUM PRIORITY (3 BLOCKS)</span>
+              <span class="kpi-val text-cyan">${mempool ? mempool.halfHourFee : 5} sat/vB</span>
+              <span class="kpi-sub">~30 MINUTE INCLUSION</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">\uD83D\uDC22 ECONOMY / LOW PRIORITY</span>
+              <span class="kpi-val text-amber">${mempool ? mempool.minimumFee : 1} sat/vB</span>
+              <span class="kpi-sub">OFF-PEAK CLEARANCE</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Open Interest Matrix -->
+        <section class="terminal-section mt-3">
+          <span class="section-title">PERPETUAL FUTURES OPEN INTEREST (OI)</span>
+          <p class="section-desc">Total outstanding derivative contracts measuring leverage exposure in the system.</p>
+
+          <table class="terminal-table mt-2">
+            <thead>
+              <tr>
+                <th>ASSET</th>
+                <th>CONTRACT</th>
+                <th>OPEN INTEREST (USD)</th>
+                <th>OPEN INTEREST (COINS)</th>
+                <th>LEVERAGE REGIME</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${Array.from(snapshot.openInterest.values()).map((oi) => `
+                <tr>
+                  <td><strong>${oi.asset}</strong></td>
+                  <td>${oi.symbol}</td>
+                  <td class="text-cyan">$${Math.round(oi.openInterestUsd).toLocaleString()}</td>
+                  <td>${oi.openInterestCoins.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${oi.asset}</td>
+                  <td><span class="regime-badge regime-extreme">HIGH LEVERAGE</span></td>
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </section>
+      </div>
+    `;
+  }
   renderRiskScreen(container) {
     let totalVal = 0;
     this.portfolio.positions.forEach((p) => {
@@ -2071,7 +2775,6 @@ class ApexWebTerminal {
           <span class="terminal-badge badge-aladdin">ALADDIN CORE ACTIVE</span>
         </div>
 
-        <!-- Aladdin High-Level Risk Metrics -->
         <div class="aladdin-kpi-grid">
           <div class="kpi-card">
             <span class="kpi-label">TOTAL PORTFOLIO VALUE</span>
@@ -2098,7 +2801,6 @@ class ApexWebTerminal {
           </div>
         </div>
 
-        <!-- Stress Testing Scenario Section -->
         <section class="terminal-section mt-4">
           <div class="section-header-flex">
             <div>
@@ -2136,7 +2838,6 @@ class ApexWebTerminal {
               </div>
             </div>
 
-            <!-- Position Stress Impact Table -->
             <table class="terminal-table mt-3">
               <thead>
                 <tr>
@@ -2301,6 +3002,16 @@ class ApexWebTerminal {
           </div>
 
           <div class="help-card">
+            <span class="help-cmd">WHALE &lt;GO&gt; [F6]</span>
+            <p>Real-time Whale radar, block prints &ge; $50K, and Cumulative Volume Delta (CVD) net institutional accumulation.</p>
+          </div>
+
+          <div class="help-card">
+            <span class="help-cmd">LIQ &lt;GO&gt; [F7]</span>
+            <p>Direct Binance Futures !forceOrder liquidation stream. Real-time liquidation alerts, long vs short rekt ratios.</p>
+          </div>
+
+          <div class="help-card">
             <span class="help-cmd">RISK &lt;GO&gt; [F3]</span>
             <p>BlackRock Aladdin Parametric Value-at-Risk (VaR 95%), Portfolio Beta to Bitcoin, and Diversification score.</p>
           </div>
@@ -2311,6 +3022,11 @@ class ApexWebTerminal {
           </div>
 
           <div class="help-card">
+            <span class="help-cmd">MACRO &lt;GO&gt;</span>
+            <p>Bitcoin Mempool sat/vB fee dynamics (mempool.space) &amp; Open Interest (OI) metrics.</p>
+          </div>
+
+          <div class="help-card">
             <span class="help-cmd">PORT &lt;GO&gt; [F8]</span>
             <p>Portfolio holdings ledger, unrealized PnL tracking, and leverage margins.</p>
           </div>
@@ -2318,11 +3034,6 @@ class ApexWebTerminal {
           <div class="help-card">
             <span class="help-cmd">BTC &lt;GO&gt; / ETH &lt;GO&gt;</span>
             <p>Direct symbol lookup and real-time execution monitor.</p>
-          </div>
-
-          <div class="help-card">
-            <span class="help-cmd">HELP &lt;GO&gt; [F1]</span>
-            <p>Display this syntax index and institutional architecture guide.</p>
           </div>
         </div>
       </div>
