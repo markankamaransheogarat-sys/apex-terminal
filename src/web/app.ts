@@ -181,6 +181,9 @@ class ApexWebTerminal {
               <span class="status-dot"></span>
               <span id="ws-status-text">CONNECTING</span>
             </div>
+            <button id="btn-theme-toggle" class="terminal-btn-sm" title="Switch Jarvis-Tech Theme (Dark Concrete / Warm Paper)">
+              ${typeof document !== "undefined" && document.documentElement.getAttribute("data-theme") === "light" ? "☀️ PAPER" : "🌙 CONCRETE"}
+            </button>
             <button id="btn-audio-toggle" class="terminal-btn-sm" title="Toggle Sound">
               ${isMuted() ? "🔇 SOUND: OFF" : "🔊 SOUND: ON"}
             </button>
@@ -247,6 +250,21 @@ class ApexWebTerminal {
     const cmdInput = document.getElementById("cmd-input") as HTMLInputElement;
     const btnGo = document.getElementById("btn-go");
     const audioToggle = document.getElementById("btn-audio-toggle");
+    const themeToggle = document.getElementById("btn-theme-toggle");
+
+    themeToggle?.addEventListener("click", () => {
+      playCommandGo();
+      const cur = document.documentElement.getAttribute("data-theme") || "dark";
+      const next = cur === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      try {
+        localStorage.setItem("jt-theme", next);
+      } catch {}
+      themeToggle.textContent = next === "light" ? "☀️ PAPER" : "🌙 CONCRETE";
+      if (this.activeScreen === "CHART" && this.chartRenderer) {
+        this.chartRenderer.render();
+      }
+    });
 
     audioToggle?.addEventListener("click", () => {
       const muted = toggleMute();
@@ -1018,7 +1036,7 @@ class ApexWebTerminal {
                   .slice(0, 15)
                   .map(
                     (b) => `
-                  <tr class="${b.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, rgba(0, 255, 102, 0.12) ${b.depthPercent.toFixed(0)}%, transparent ${b.depthPercent.toFixed(0)}%);">
+                  <tr class="${b.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, var(--up-tint) ${b.depthPercent.toFixed(0)}%, transparent ${b.depthPercent.toFixed(0)}%);">
                     <td class="text-green font-bold">$${b.price.toLocaleString(undefined, { minimumFractionDigits: b.price < 10 ? 4 : 2 })}</td>
                     <td>${b.quantity.toLocaleString(undefined, { maximumFractionDigits: 3 })}</td>
                     <td>$${Math.round(b.notionalUsd).toLocaleString()}</td>
@@ -1055,7 +1073,7 @@ class ApexWebTerminal {
                   .slice(0, 15)
                   .map(
                     (a) => `
-                  <tr class="${a.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, rgba(255, 51, 68, 0.12) ${a.depthPercent.toFixed(0)}%, transparent ${a.depthPercent.toFixed(0)}%);">
+                  <tr class="${a.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, var(--down-tint) ${a.depthPercent.toFixed(0)}%, transparent ${a.depthPercent.toFixed(0)}%);">
                     <td class="text-red font-bold">$${a.price.toLocaleString(undefined, { minimumFractionDigits: a.price < 10 ? 4 : 2 })}</td>
                     <td>${a.quantity.toLocaleString(undefined, { maximumFractionDigits: 3 })}</td>
                     <td>$${Math.round(a.notionalUsd).toLocaleString()}</td>

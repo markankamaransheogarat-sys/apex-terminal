@@ -121,9 +121,22 @@ export class CanvasChartRenderer {
     const yToPrice = (y: number) =>
       maxPrice - ((y - this.padTop) / priceAreaH) * priceRange;
 
+    const isLight =
+      typeof document !== "undefined" &&
+      document.documentElement.getAttribute("data-theme") === "light";
+    const colUp = isLight ? "#1e9e6b" : "#8caa6b";
+    const colDown = isLight ? "#c8452e" : "#c1684e";
+    const colAmber = isLight ? "#a6791f" : "#d8b876";
+    const colMuted = isLight ? "#6f6d64" : "#b8b8ad";
+    const colText = isLight ? "#17181a" : "#f1eee4";
+    const colBg = isLight ? "#f2f1ec" : "#111210";
+    const colGrid = isLight
+      ? "rgba(226, 224, 216, 0.8)"
+      : "rgba(48, 51, 46, 0.65)";
+
     // 1. Background Grid Lines
     if (this.options.showGrid) {
-      ctx.strokeStyle = "rgba(45, 59, 82, 0.35)";
+      ctx.strokeStyle = colGrid;
       ctx.lineWidth = 1;
 
       // Horizontal price grid (5 levels)
@@ -137,7 +150,7 @@ export class CanvasChartRenderer {
         ctx.stroke();
 
         // Price label on right axis
-        ctx.fillStyle = "#8892b0";
+        ctx.fillStyle = colMuted;
         ctx.font = "10px monospace";
         ctx.textAlign = "left";
         ctx.fillText(
@@ -159,12 +172,12 @@ export class CanvasChartRenderer {
         const x = width - this.padRight - barW;
 
         ctx.fillStyle = node.isPOC
-          ? "rgba(0, 216, 255, 0.28)" // POC cyan glow
-          : "rgba(255, 153, 0, 0.08)";
+          ? "rgba(140, 170, 107, 0.28)" // POC sage olive glow
+          : "rgba(216, 184, 118, 0.09)";
         ctx.fillRect(x, y, barW, Math.max(1, barH - 1));
 
         if (node.isPOC) {
-          ctx.strokeStyle = "rgba(0, 216, 255, 0.7)";
+          ctx.strokeStyle = colUp;
           ctx.lineWidth = 1;
           ctx.strokeRect(x, y, barW, Math.max(1, barH - 1));
         }
@@ -192,14 +205,14 @@ export class CanvasChartRenderer {
     candles.forEach((c, i) => {
       const x = this.padLeft + i * candleSpacing + candleSpacing / 2;
       const isUp = c.close >= c.open;
-      const color = isUp ? "#00ff66" : "#ff3344";
+      const color = isUp ? colUp : colDown;
 
       // Volume bar at bottom
       const volH = maxVolume > 0 ? (c.volume / maxVolume) * volAreaH : 0;
       const volY = this.padTop + plotH - volH;
       ctx.fillStyle = isUp
-        ? "rgba(0, 255, 102, 0.3)"
-        : "rgba(255, 51, 68, 0.3)";
+        ? "rgba(140, 170, 107, 0.32)"
+        : "rgba(193, 104, 78, 0.32)";
       ctx.fillRect(x - candleWidth / 2, volY, candleWidth, volH);
 
       // Wick (High - Low)
@@ -224,7 +237,7 @@ export class CanvasChartRenderer {
 
     // 4. VWAP Line Overlay
     if (this.options.showVWAP && vwap.length === candles.length) {
-      ctx.strokeStyle = "#ff9900";
+      ctx.strokeStyle = colAmber;
       ctx.lineWidth = 1.5;
       ctx.setLineDash([3, 2]);
       ctx.beginPath();
@@ -242,9 +255,9 @@ export class CanvasChartRenderer {
       // VWAP label on right axis
       const latestVWAP = vwap[vwap.length - 1]!;
       const vwapY = priceToY(latestVWAP);
-      ctx.fillStyle = "#ff9900";
+      ctx.fillStyle = colAmber;
       ctx.fillRect(width - this.padRight, vwapY - 7, 72, 14);
-      ctx.fillStyle = "#000";
+      ctx.fillStyle = "#111210";
       ctx.font = "bold 9px monospace";
       ctx.textAlign = "left";
       ctx.fillText(
@@ -272,9 +285,7 @@ export class CanvasChartRenderer {
           Math.min(this.padTop + priceAreaH - 6, priceToY(camp.vwapPrice)),
         );
         const isBuy = camp.side === "BUY";
-        const lineColor = isBuy
-          ? "rgba(0, 255, 102, 0.75)"
-          : "rgba(255, 51, 68, 0.75)";
+        const lineColor = isBuy ? colUp : colDown;
 
         ctx.strokeStyle = lineColor;
         ctx.lineWidth = 1.5;
@@ -290,12 +301,12 @@ export class CanvasChartRenderer {
         ctx.font = "bold 10px monospace";
         const textW = ctx.measureText(tagText).width + 10;
         ctx.fillStyle = isBuy
-          ? "rgba(0, 40, 22, 0.88)"
-          : "rgba(48, 8, 16, 0.88)";
+          ? "rgba(35, 43, 28, 0.92)"
+          : "rgba(46, 32, 25, 0.92)";
         ctx.fillRect(this.padLeft + 8, y - 14, textW, 14);
         ctx.strokeStyle = lineColor;
         ctx.strokeRect(this.padLeft + 8, y - 14, textW, 14);
-        ctx.fillStyle = isBuy ? "#00ff66" : "#ff3344";
+        ctx.fillStyle = isBuy ? "#c9d9a0" : "#e3a78c";
         ctx.textAlign = "left";
         ctx.fillText(tagText, this.padLeft + 13, y - 4);
       }
@@ -340,10 +351,10 @@ export class CanvasChartRenderer {
             ctx.arc(cx, cy, radius, 0, Math.PI * 2);
             ctx.fillStyle =
               wt.side === "BUY"
-                ? "rgba(0, 216, 255, 0.55)"
-                : "rgba(255, 153, 0, 0.55)";
+                ? "rgba(140, 170, 107, 0.55)"
+                : "rgba(216, 184, 118, 0.55)";
             ctx.fill();
-            ctx.strokeStyle = wt.side === "BUY" ? "#00d8ff" : "#ff9900";
+            ctx.strokeStyle = wt.side === "BUY" ? colUp : colAmber;
             ctx.lineWidth = 1.5;
             ctx.stroke();
           }
@@ -355,7 +366,7 @@ export class CanvasChartRenderer {
     const latestCandle = candles[candles.length - 1]!;
     const curY = priceToY(latestCandle.close);
     const curUp = latestCandle.close >= latestCandle.open;
-    const curColor = curUp ? "#00ff66" : "#ff3344";
+    const curColor = curUp ? colUp : colDown;
 
     ctx.strokeStyle = curColor;
     ctx.lineWidth = 1;
@@ -369,7 +380,7 @@ export class CanvasChartRenderer {
     // Price tag on scale
     ctx.fillStyle = curColor;
     ctx.fillRect(width - this.padRight, curY - 9, 74, 18);
-    ctx.fillStyle = "#000";
+    ctx.fillStyle = "#111210";
     ctx.font = "bold 10px monospace";
     ctx.textAlign = "left";
     ctx.fillText(
@@ -384,7 +395,9 @@ export class CanvasChartRenderer {
         this.padLeft + hoverIdx * candleSpacing + candleSpacing / 2;
       const crossY = this.hoverY;
 
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+      ctx.strokeStyle = isLight
+        ? "rgba(23, 24, 26, 0.35)"
+        : "rgba(241, 238, 228, 0.35)";
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 4]);
 
@@ -403,9 +416,9 @@ export class CanvasChartRenderer {
 
       // Hover Price Tag on right axis
       const hoverPrice = yToPrice(crossY);
-      ctx.fillStyle = "#e2e8f0";
+      ctx.fillStyle = colText;
       ctx.fillRect(width - this.padRight, crossY - 8, 74, 16);
-      ctx.fillStyle = "#040608";
+      ctx.fillStyle = colBg;
       ctx.font = "bold 10px monospace";
       ctx.fillText(
         `$${hoverPrice.toLocaleString(undefined, { minimumFractionDigits: hoverPrice < 10 ? 4 : 2 })}`,
@@ -419,9 +432,9 @@ export class CanvasChartRenderer {
         hour: "2-digit",
         minute: "2-digit",
       });
-      ctx.fillStyle = "#e2e8f0";
+      ctx.fillStyle = colText;
       ctx.fillRect(crossX - 25, height - this.padBottom + 2, 50, 16);
-      ctx.fillStyle = "#040608";
+      ctx.fillStyle = colBg;
       ctx.textAlign = "center";
       ctx.fillText(timeStr, crossX, height - this.padBottom + 14);
     }
@@ -433,18 +446,27 @@ export class CanvasChartRenderer {
   private renderHUD(ctx: CanvasRenderingContext2D): void {
     if (!this.data || this.data.candles.length === 0) return;
 
+    const isLight =
+      typeof document !== "undefined" &&
+      document.documentElement.getAttribute("data-theme") === "light";
+    const colUp = isLight ? "#1e9e6b" : "#8caa6b";
+    const colDown = isLight ? "#c8452e" : "#c1684e";
+    const colAmber = isLight ? "#a6791f" : "#d8b876";
+    const colMuted = isLight ? "#6f6d64" : "#b8b8ad";
+    const colText = isLight ? "#17181a" : "#f1eee4";
+
     const c =
       this.hoveredCandle || this.data.candles[this.data.candles.length - 1]!;
     const chg = c.close - c.open;
     const chgPct = (chg / c.open) * 100;
-    const color = chg >= 0 ? "#00ff66" : "#ff3344";
+    const color = chg >= 0 ? colUp : colDown;
     const sign = chg >= 0 ? "+" : "";
 
     ctx.font = "11px monospace";
     ctx.textAlign = "left";
 
     // Symbol & Timeframe badge
-    ctx.fillStyle = "#ff9900";
+    ctx.fillStyle = colAmber;
     ctx.fillText(
       `${this.data.symbol} [${this.data.timeframe.toUpperCase()}]`,
       this.padLeft,
@@ -457,17 +479,17 @@ export class CanvasChartRenderer {
       {
         label: "O",
         val: `$${c.open.toLocaleString(undefined, { minimumFractionDigits: c.open < 10 ? 4 : 2 })}`,
-        color: "#e2e8f0",
+        color: colText,
       },
       {
         label: "H",
         val: `$${c.high.toLocaleString(undefined, { minimumFractionDigits: c.high < 10 ? 4 : 2 })}`,
-        color: "#e2e8f0",
+        color: colText,
       },
       {
         label: "L",
         val: `$${c.low.toLocaleString(undefined, { minimumFractionDigits: c.low < 10 ? 4 : 2 })}`,
-        color: "#e2e8f0",
+        color: colText,
       },
       {
         label: "C",
@@ -478,7 +500,7 @@ export class CanvasChartRenderer {
       {
         label: "VOL",
         val: `${Math.round(c.volume).toLocaleString()}`,
-        color: "#00d8ff",
+        color: colUp,
       },
     ];
 
@@ -486,12 +508,12 @@ export class CanvasChartRenderer {
       items.push({
         label: "VWAP",
         val: `$${c.vwap.toLocaleString(undefined, { maximumFractionDigits: 1 })}`,
-        color: "#ff9900",
+        color: colAmber,
       });
     }
 
     items.forEach((item) => {
-      ctx.fillStyle = "#8892b0";
+      ctx.fillStyle = colMuted;
       ctx.fillText(`${item.label}:`, xOffset, 16);
       xOffset += ctx.measureText(`${item.label}: `).width;
 
@@ -503,7 +525,7 @@ export class CanvasChartRenderer {
 
   private renderEmptyState(width: number, height: number): void {
     const ctx = this.ctx;
-    ctx.fillStyle = "#8892b0";
+    ctx.fillStyle = "#b8b8ad";
     ctx.font = "12px monospace";
     ctx.textAlign = "center";
     ctx.fillText(

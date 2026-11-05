@@ -3980,8 +3980,16 @@ var CanvasChartRenderer = class {
     const priceRange = maxPrice - minPrice || 1;
     const priceToY = (price) => this.padTop + priceAreaH - (price - minPrice) / priceRange * priceAreaH;
     const yToPrice = (y) => maxPrice - (y - this.padTop) / priceAreaH * priceRange;
+    const isLight = typeof document !== "undefined" && document.documentElement.getAttribute("data-theme") === "light";
+    const colUp = isLight ? "#1e9e6b" : "#8caa6b";
+    const colDown = isLight ? "#c8452e" : "#c1684e";
+    const colAmber = isLight ? "#a6791f" : "#d8b876";
+    const colMuted = isLight ? "#6f6d64" : "#b8b8ad";
+    const colText = isLight ? "#17181a" : "#f1eee4";
+    const colBg = isLight ? "#f2f1ec" : "#111210";
+    const colGrid = isLight ? "rgba(226, 224, 216, 0.8)" : "rgba(48, 51, 46, 0.65)";
     if (this.options.showGrid) {
-      ctx.strokeStyle = "rgba(45, 59, 82, 0.35)";
+      ctx.strokeStyle = colGrid;
       ctx.lineWidth = 1;
       const gridLevels = 5;
       for (let i = 0; i <= gridLevels; i++) {
@@ -3991,7 +3999,7 @@ var CanvasChartRenderer = class {
         ctx.moveTo(this.padLeft, y);
         ctx.lineTo(width - this.padRight, y);
         ctx.stroke();
-        ctx.fillStyle = "#8892b0";
+        ctx.fillStyle = colMuted;
         ctx.font = "10px monospace";
         ctx.textAlign = "left";
         ctx.fillText(
@@ -4008,10 +4016,10 @@ var CanvasChartRenderer = class {
         const y = priceToY(node.priceLevel) - barH / 2;
         const barW = node.percentage / 100 * maxBarWidth;
         const x = width - this.padRight - barW;
-        ctx.fillStyle = node.isPOC ? "rgba(0, 216, 255, 0.28)" : "rgba(255, 153, 0, 0.08)";
+        ctx.fillStyle = node.isPOC ? "rgba(140, 170, 107, 0.28)" : "rgba(216, 184, 118, 0.09)";
         ctx.fillRect(x, y, barW, Math.max(1, barH - 1));
         if (node.isPOC) {
-          ctx.strokeStyle = "rgba(0, 216, 255, 0.7)";
+          ctx.strokeStyle = colUp;
           ctx.lineWidth = 1;
           ctx.strokeRect(x, y, barW, Math.max(1, barH - 1));
         }
@@ -4031,10 +4039,10 @@ var CanvasChartRenderer = class {
     candles.forEach((c, i) => {
       const x = this.padLeft + i * candleSpacing + candleSpacing / 2;
       const isUp = c.close >= c.open;
-      const color = isUp ? "#00ff66" : "#ff3344";
+      const color = isUp ? colUp : colDown;
       const volH = maxVolume > 0 ? c.volume / maxVolume * volAreaH : 0;
       const volY = this.padTop + plotH - volH;
-      ctx.fillStyle = isUp ? "rgba(0, 255, 102, 0.3)" : "rgba(255, 51, 68, 0.3)";
+      ctx.fillStyle = isUp ? "rgba(140, 170, 107, 0.32)" : "rgba(193, 104, 78, 0.32)";
       ctx.fillRect(x - candleWidth / 2, volY, candleWidth, volH);
       const highY = priceToY(c.high);
       const lowY = priceToY(c.low);
@@ -4052,7 +4060,7 @@ var CanvasChartRenderer = class {
       ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyH);
     });
     if (this.options.showVWAP && vwap.length === candles.length) {
-      ctx.strokeStyle = "#ff9900";
+      ctx.strokeStyle = colAmber;
       ctx.lineWidth = 1.5;
       ctx.setLineDash([3, 2]);
       ctx.beginPath();
@@ -4067,9 +4075,9 @@ var CanvasChartRenderer = class {
       ctx.setLineDash([]);
       const latestVWAP = vwap[vwap.length - 1];
       const vwapY = priceToY(latestVWAP);
-      ctx.fillStyle = "#ff9900";
+      ctx.fillStyle = colAmber;
       ctx.fillRect(width - this.padRight, vwapY - 7, 72, 14);
-      ctx.fillStyle = "#000";
+      ctx.fillStyle = "#111210";
       ctx.font = "bold 9px monospace";
       ctx.textAlign = "left";
       ctx.fillText(
@@ -4089,7 +4097,7 @@ var CanvasChartRenderer = class {
           Math.min(this.padTop + priceAreaH - 6, priceToY(camp.vwapPrice))
         );
         const isBuy = camp.side === "BUY";
-        const lineColor = isBuy ? "rgba(0, 255, 102, 0.75)" : "rgba(255, 51, 68, 0.75)";
+        const lineColor = isBuy ? colUp : colDown;
         ctx.strokeStyle = lineColor;
         ctx.lineWidth = 1.5;
         ctx.setLineDash([6, 3]);
@@ -4101,11 +4109,11 @@ var CanvasChartRenderer = class {
         const tagText = `\u{1F40B} ${camp.campaignId} ${camp.algoType} VWAP $${camp.vwapPrice.toLocaleString(void 0, { maximumFractionDigits: 2 })} ($${(camp.totalValueUsd / 1e6).toFixed(2)}M \xB7 ${camp.trancheCount}x)`;
         ctx.font = "bold 10px monospace";
         const textW = ctx.measureText(tagText).width + 10;
-        ctx.fillStyle = isBuy ? "rgba(0, 40, 22, 0.88)" : "rgba(48, 8, 16, 0.88)";
+        ctx.fillStyle = isBuy ? "rgba(35, 43, 28, 0.92)" : "rgba(46, 32, 25, 0.92)";
         ctx.fillRect(this.padLeft + 8, y - 14, textW, 14);
         ctx.strokeStyle = lineColor;
         ctx.strokeRect(this.padLeft + 8, y - 14, textW, 14);
-        ctx.fillStyle = isBuy ? "#00ff66" : "#ff3344";
+        ctx.fillStyle = isBuy ? "#c9d9a0" : "#e3a78c";
         ctx.textAlign = "left";
         ctx.fillText(tagText, this.padLeft + 13, y - 4);
       }
@@ -4137,9 +4145,9 @@ var CanvasChartRenderer = class {
             );
             ctx.beginPath();
             ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-            ctx.fillStyle = wt.side === "BUY" ? "rgba(0, 216, 255, 0.55)" : "rgba(255, 153, 0, 0.55)";
+            ctx.fillStyle = wt.side === "BUY" ? "rgba(140, 170, 107, 0.55)" : "rgba(216, 184, 118, 0.55)";
             ctx.fill();
-            ctx.strokeStyle = wt.side === "BUY" ? "#00d8ff" : "#ff9900";
+            ctx.strokeStyle = wt.side === "BUY" ? colUp : colAmber;
             ctx.lineWidth = 1.5;
             ctx.stroke();
           }
@@ -4149,7 +4157,7 @@ var CanvasChartRenderer = class {
     const latestCandle = candles[candles.length - 1];
     const curY = priceToY(latestCandle.close);
     const curUp = latestCandle.close >= latestCandle.open;
-    const curColor = curUp ? "#00ff66" : "#ff3344";
+    const curColor = curUp ? colUp : colDown;
     ctx.strokeStyle = curColor;
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 2]);
@@ -4160,7 +4168,7 @@ var CanvasChartRenderer = class {
     ctx.setLineDash([]);
     ctx.fillStyle = curColor;
     ctx.fillRect(width - this.padRight, curY - 9, 74, 18);
-    ctx.fillStyle = "#000";
+    ctx.fillStyle = "#111210";
     ctx.font = "bold 10px monospace";
     ctx.textAlign = "left";
     ctx.fillText(
@@ -4171,7 +4179,7 @@ var CanvasChartRenderer = class {
     if (this.hoverX !== null && this.hoverY !== null && hoverIdx >= 0) {
       const crossX = this.padLeft + hoverIdx * candleSpacing + candleSpacing / 2;
       const crossY = this.hoverY;
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+      ctx.strokeStyle = isLight ? "rgba(23, 24, 26, 0.35)" : "rgba(241, 238, 228, 0.35)";
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
@@ -4184,9 +4192,9 @@ var CanvasChartRenderer = class {
       ctx.stroke();
       ctx.setLineDash([]);
       const hoverPrice = yToPrice(crossY);
-      ctx.fillStyle = "#e2e8f0";
+      ctx.fillStyle = colText;
       ctx.fillRect(width - this.padRight, crossY - 8, 74, 16);
-      ctx.fillStyle = "#040608";
+      ctx.fillStyle = colBg;
       ctx.font = "bold 10px monospace";
       ctx.fillText(
         `$${hoverPrice.toLocaleString(void 0, { minimumFractionDigits: hoverPrice < 10 ? 4 : 2 })}`,
@@ -4198,9 +4206,9 @@ var CanvasChartRenderer = class {
         hour: "2-digit",
         minute: "2-digit"
       });
-      ctx.fillStyle = "#e2e8f0";
+      ctx.fillStyle = colText;
       ctx.fillRect(crossX - 25, height - this.padBottom + 2, 50, 16);
-      ctx.fillStyle = "#040608";
+      ctx.fillStyle = colBg;
       ctx.textAlign = "center";
       ctx.fillText(timeStr, crossX, height - this.padBottom + 14);
     }
@@ -4208,14 +4216,20 @@ var CanvasChartRenderer = class {
   }
   renderHUD(ctx) {
     if (!this.data || this.data.candles.length === 0) return;
+    const isLight = typeof document !== "undefined" && document.documentElement.getAttribute("data-theme") === "light";
+    const colUp = isLight ? "#1e9e6b" : "#8caa6b";
+    const colDown = isLight ? "#c8452e" : "#c1684e";
+    const colAmber = isLight ? "#a6791f" : "#d8b876";
+    const colMuted = isLight ? "#6f6d64" : "#b8b8ad";
+    const colText = isLight ? "#17181a" : "#f1eee4";
     const c = this.hoveredCandle || this.data.candles[this.data.candles.length - 1];
     const chg = c.close - c.open;
     const chgPct = chg / c.open * 100;
-    const color = chg >= 0 ? "#00ff66" : "#ff3344";
+    const color = chg >= 0 ? colUp : colDown;
     const sign = chg >= 0 ? "+" : "";
     ctx.font = "11px monospace";
     ctx.textAlign = "left";
-    ctx.fillStyle = "#ff9900";
+    ctx.fillStyle = colAmber;
     ctx.fillText(
       `${this.data.symbol} [${this.data.timeframe.toUpperCase()}]`,
       this.padLeft,
@@ -4226,17 +4240,17 @@ var CanvasChartRenderer = class {
       {
         label: "O",
         val: `$${c.open.toLocaleString(void 0, { minimumFractionDigits: c.open < 10 ? 4 : 2 })}`,
-        color: "#e2e8f0"
+        color: colText
       },
       {
         label: "H",
         val: `$${c.high.toLocaleString(void 0, { minimumFractionDigits: c.high < 10 ? 4 : 2 })}`,
-        color: "#e2e8f0"
+        color: colText
       },
       {
         label: "L",
         val: `$${c.low.toLocaleString(void 0, { minimumFractionDigits: c.low < 10 ? 4 : 2 })}`,
-        color: "#e2e8f0"
+        color: colText
       },
       {
         label: "C",
@@ -4247,18 +4261,18 @@ var CanvasChartRenderer = class {
       {
         label: "VOL",
         val: `${Math.round(c.volume).toLocaleString()}`,
-        color: "#00d8ff"
+        color: colUp
       }
     ];
     if (c.vwap) {
       items.push({
         label: "VWAP",
         val: `$${c.vwap.toLocaleString(void 0, { maximumFractionDigits: 1 })}`,
-        color: "#ff9900"
+        color: colAmber
       });
     }
     items.forEach((item) => {
-      ctx.fillStyle = "#8892b0";
+      ctx.fillStyle = colMuted;
       ctx.fillText(`${item.label}:`, xOffset, 16);
       xOffset += ctx.measureText(`${item.label}: `).width;
       ctx.fillStyle = item.color;
@@ -4268,7 +4282,7 @@ var CanvasChartRenderer = class {
   }
   renderEmptyState(width, height) {
     const ctx = this.ctx;
-    ctx.fillStyle = "#8892b0";
+    ctx.fillStyle = "#b8b8ad";
     ctx.font = "12px monospace";
     ctx.textAlign = "center";
     ctx.fillText(
@@ -5260,6 +5274,9 @@ var ApexWebTerminal = class {
               <span class="status-dot"></span>
               <span id="ws-status-text">CONNECTING</span>
             </div>
+            <button id="btn-theme-toggle" class="terminal-btn-sm" title="Switch Jarvis-Tech Theme (Dark Concrete / Warm Paper)">
+              ${typeof document !== "undefined" && document.documentElement.getAttribute("data-theme") === "light" ? "\u2600\uFE0F PAPER" : "\u{1F319} CONCRETE"}
+            </button>
             <button id="btn-audio-toggle" class="terminal-btn-sm" title="Toggle Sound">
               ${isMuted() ? "\u{1F507} SOUND: OFF" : "\u{1F50A} SOUND: ON"}
             </button>
@@ -5325,6 +5342,21 @@ var ApexWebTerminal = class {
     const cmdInput = document.getElementById("cmd-input");
     const btnGo = document.getElementById("btn-go");
     const audioToggle = document.getElementById("btn-audio-toggle");
+    const themeToggle = document.getElementById("btn-theme-toggle");
+    themeToggle?.addEventListener("click", () => {
+      playCommandGo();
+      const cur = document.documentElement.getAttribute("data-theme") || "dark";
+      const next = cur === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      try {
+        localStorage.setItem("jt-theme", next);
+      } catch {
+      }
+      themeToggle.textContent = next === "light" ? "\u2600\uFE0F PAPER" : "\u{1F319} CONCRETE";
+      if (this.activeScreen === "CHART" && this.chartRenderer) {
+        this.chartRenderer.render();
+      }
+    });
     audioToggle?.addEventListener("click", () => {
       const muted = toggleMute();
       audioToggle.textContent = muted ? "\u{1F507} SOUND: OFF" : "\u{1F50A} SOUND: ON";
@@ -5939,7 +5971,7 @@ var ApexWebTerminal = class {
               <tbody>
                 ${snap.bids.slice(0, 15).map(
       (b) => `
-                  <tr class="${b.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, rgba(0, 255, 102, 0.12) ${b.depthPercent.toFixed(0)}%, transparent ${b.depthPercent.toFixed(0)}%);">
+                  <tr class="${b.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, var(--up-tint) ${b.depthPercent.toFixed(0)}%, transparent ${b.depthPercent.toFixed(0)}%);">
                     <td class="text-green font-bold">$${b.price.toLocaleString(void 0, { minimumFractionDigits: b.price < 10 ? 4 : 2 })}</td>
                     <td>${b.quantity.toLocaleString(void 0, { maximumFractionDigits: 3 })}</td>
                     <td>$${Math.round(b.notionalUsd).toLocaleString()}</td>
@@ -5969,7 +6001,7 @@ var ApexWebTerminal = class {
               <tbody>
                 ${snap.asks.slice(0, 15).map(
       (a) => `
-                  <tr class="${a.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, rgba(255, 51, 68, 0.12) ${a.depthPercent.toFixed(0)}%, transparent ${a.depthPercent.toFixed(0)}%);">
+                  <tr class="${a.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, var(--down-tint) ${a.depthPercent.toFixed(0)}%, transparent ${a.depthPercent.toFixed(0)}%);">
                     <td class="text-red font-bold">$${a.price.toLocaleString(void 0, { minimumFractionDigits: a.price < 10 ? 4 : 2 })}</td>
                     <td>${a.quantity.toLocaleString(void 0, { maximumFractionDigits: 3 })}</td>
                     <td>$${Math.round(a.notionalUsd).toLocaleString()}</td>
