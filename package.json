@@ -10,7 +10,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --import tsx --test tests/**/*.test.ts",
+    "test": "node --import tsx --test tests/**/*.test.ts tests/**/*.test.js",
+    "test:audio": "node --test tests/audio.test.js",
     "terminal": "node --import tsx src/index.ts",
     "clean": "rm -rf dist"
   },
