@@ -1,93 +1,61 @@
-# 🏛️ Apex Terminal — Bloomberg Terminal & BlackRock Aladdin for Digital Assets
+# 🏛️ Apex Terminal — Institutional Quant Execution, Orderflow & BlackRock Aladdin Risk Engine
 
-Institutional-grade digital asset execution telemetry, real-time public feeds, and Aladdin risk analytics engine.
+Institutional digital asset execution cockpit, 24-hour multi-venue whale tranche clustering engine, L2 Stoikov micro-price orderbook analyzer, Deribit options gamma radar, and BlackRock Aladdin risk matrix.
 
-[![Live Terminal](https://img.shields.io/badge/Live_Terminal-GitHub_Pages-00d8ff?style=for-the-badge&logo=github)](https://markankamaransheogarat-sys.github.io/apex-terminal/)
-[![Tests](https://img.shields.io/badge/Tests-75%2F75_Passed-00ff66?style=for-the-badge)](https://github.com/markankamaransheogarat-sys/apex-terminal)
-[![Audio](https://img.shields.io/badge/Audio-Procedural_Web_Audio-ff9900?style=for-the-badge)](https://github.com/markankamaransheogarat-sys/apex-terminal)
-[![Zero-Cloud](https://img.shields.io/badge/Zero--Cloud-100%25_Local-8b5cf6?style=for-the-badge)](https://github.com/markankamaransheogarat-sys/apex-terminal)
+[![Live Terminal](https://img.shields.io/badge/Live_Terminal-GitHub_Pages-8caa6b?style=for-the-badge&logo=github)](https://markankamaransheogarat-sys.github.io/apex-terminal/)
+[![Tests](https://img.shields.io/badge/Tests-95%2F95_Passed-8caa6b?style=for-the-badge)](https://github.com/markankamaransheogarat-sys/apex-terminal)
+[![Design System](https://img.shields.io/badge/Theme-Jarvis--Tech_Concrete_%26_Paper-d8b876?style=for-the-badge)](https://markankamaransheogarat-sys.github.io/apex-terminal/)
+[![Zero-Key Feeds](https://img.shields.io/badge/Feeds-5_Direct_WebSockets_%2B_Deribit-5d909b?style=for-the-badge)](https://github.com/markankamaransheogarat-sys/apex-terminal)
 
 👉 **Launch Live Web Terminal**: [https://markankamaransheogarat-sys.github.io/apex-terminal/](https://markankamaransheogarat-sys.github.io/apex-terminal/)
 
 ---
 
-## ⚡ Architectural Overview
+## ⚡ 14 Institutional `<GO>` Modules
 
-```
-                                    ┌────────────────────────────────────────┐
-                                    │        APEX TERMINAL PRO (ANSI)        │
-                                    │    (Bloomberg Lexer & Key Dispatch)    │
-                                    └───────────────────┬────────────────────┘
-                                                        │
-                                                        ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                         APEX UNIFIED CORE ENGINE                                                │
-│                                                                                                                 │
-│   ┌──────────────────────────────────────────────┐        ┌─────────────────────────────────────────────────┐   │
-│   │         Public Free Feeds Subsystem          │        │          BlackRock Aladdin Risk Engine          │   │
-│   │                                              │        │                                                 │   │
-│   │  • Binance Public WS (!miniTicker & Multi)   │        │  • Parametric Value-at-Risk (VaR 95% / 99%)     │   │
-│   │  • Bybit V5 Public WS (Linear / Spot)        │        │  • Benchmark Beta vs BTC Systemic Sensitivity   │   │
-│   │  • REST Fallback Cascade (Alternative.me)    │        │  • Multi-factor Stress Testing & Solvency       │   │
-│   │  • Binance Futures Funding Heatmap Engine    │        │  • Non-linear Liquidation Proximity Radar       │   │
-│   │  • In-Memory L1 Ticker Book & Watchdogs      │        │  • Institutional Diversification Score (0-100)  │   │
-│   └──────────────────────────────────────────────┘        └─────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-```
+| Screen Command | Module & Quantitative Capabilities |
+| :--- | :--- |
+| **`MARKET <GO>`** `[F2]` | Live multi-asset streaming matrix (`Binance WS`), 24h orderflow bid/ask imbalance, and Fear & Greed index. |
+| **`📈 CHART <GO>`** `[F5]` | 60 FPS HTML5 Canvas candlestick chart with session VWAP, horizontal Volume Profile (POC), and overlaid **Whale Campaign VWAP lines & block trade footprints**. |
+| **`🧱 BOOK <GO>`** | 100ms L2 Orderbook Depth (`@depth20@100ms`), **Stoikov (2018) Micro-Price & micro-alpha skew (bps)**, 20-level OBI, **Liquidity Wall Detector** ($\ge 2.2\times$ mean depth), and \$500K market sweep slippage estimator. |
+| **`🧮 EXEC <GO>`** | **Quant Execution Calculator**: **Wall-Protected Stop-Loss** (shielded behind L2 Bid/Ask Wall + $0.45\times \text{ATR}_{14}$ noise buffer), **Half-Kelly Position Sizer**, `TP1 (1.5R)` / `TP2 (2.5R)` / `TP3 (50x Magnet)`, and **25x–100x Liquidation Magnet Cluster Heatmap**. |
+| **`🦅 DERIV <GO>`** | **Deribit Live Options Gamma & Max Pain Matrix** (`BTC` & `ETH` Max Pain Strike, Call Wall, Put Wall, Put/Call Ratio, Mean IV %) + **4-Quadrant OI Regime Matrix** (`LONG_BUILDUP`, `SHORT_COVERING`, `SHORT_BUILDUP`, `LONG_CAPITULATION`), Smart Money vs Retail L/S, and **RVOL / Whale CVD Divergence Scanner**. |
+| **`🐋 WHALE <GO>`** `[F6]` | **24-Hour IndexedDB Whale Persistence**, 5 live zero-key streams (`Binance Spot aggTrade` with exact `l - f + 1` swept orders, `Bybit V5`, `OKX V5`, `Binance !forceOrder`, `mempool.space`), **4-Factor Tranche Clustering Engine** (`ICEBERG_CLIP`, `CROSS_VENUE_SWEEP`, `TWAP_CAMPAIGN`, `ORDERBOOK_SWEEP`), **Hybrid Alpha Engine**, **Live Signal Attribution Tracker (bps, MFE, Win Rate, Profit Factor)**, and 1-click CSV/JSON export. |
+| **`⚡ LIQ <GO>`** `[F7]` | Real-time multi-venue forced liquidations radar (`Binance Futures` + `Bybit V5` + `OKX V5`) with Long vs Short casualty ratio breakdown. |
+| **`RISK <GO>`** `[F3]` | **BlackRock Aladdin Risk Engine**: 1-day Parametric $\text{VaR}_{95\%}$ & $\text{VaR}_{99\%}$ from real 60-day Binance daily return covariance, Portfolio Beta to BTC, Diversification Score ($0\text{–}100$), and multi-factor stress testing. |
+| **`💰 ARB <GO>`** `[F9]` | Institutional Cash & Carry Basis Arbitrage Matrix: Spot vs Perpetual spread, annualized delta-neutral yield, and funding carry signals. |
+| **`FUND <GO>`** `[F4]` | Perpetual futures funding rate heatmap, annualized APR/APY compounding, and crowded short-squeeze trigger detector. |
+| **`📰 NEWS <GO>`** `[F10]` | Real-time crypto news wire with algorithmic NLP sentiment scoring (Bullish / Bearish / Neutral). |
+| **`MACRO <GO>`** | Bitcoin Mempool `sat/vB` fee priority dynamics (`mempool.space`) & cross-asset Futures Open Interest (`fapi.binance.com`). |
+| **`PORT <GO>`** `[F8]` | Verified institutional reserve presets (`MicroStrategy`, `BlackRock IBIT`, `Vitalik`, `Tether`) + custom personal portfolio ledger persisted in browser storage. |
+| **`🔔 ALERT <GO>`** | Browser desktop notifications, procedural Web Audio synthesis, and **Direct Telegram Quant Bot Webhook Bridge** for automated alpha & whale alerts. |
 
 ---
 
-## 📐 Quantitative Models & Mathematical Foundations
+## 📐 Core Quantitative Models
 
-### 1. Parametric Value-at-Risk (1-Day $\text{VaR}_{95\%}$ & $\text{VaR}_{99\%}$)
-$$\sigma_p^2 = \mathbf{w}^T \mathbf{\Sigma} \mathbf{w} = \sum_{i=1}^N \sum_{j=1}^N w_i w_j \Sigma_{ij}$$
-$$\text{VaR}_{1-\alpha} = \text{PortfolioValue} \times Z_{1-\alpha} \times \sigma_p$$
-- **Component VaR ($\text{CVaR}_i$)**: $\text{CVaR}_i = w_i \times \text{PortfolioValue} \times Z \times \frac{(\mathbf{\Sigma}\mathbf{w})_i}{\sigma_p}$
-- **Marginal VaR ($\text{MVaR}_i$)**: $\frac{\partial \text{VaR}}{\partial w_i}$
-- **Sum Property**: $\sum_{i=1}^N \text{CVaR}_i = \text{VaR}$
+### 1. Stoikov (2018) Micro-Price & Order Book Imbalance (`BOOK <GO>`)
+$$I = \frac{Q_{\text{bid}}}{Q_{\text{bid}} + Q_{\text{ask}}}, \quad P_{\text{micro}} = P_{\text{bid}} \cdot (1 - I) + P_{\text{ask}} \cdot I$$
+$$\text{MicroSkew (bps)} = \frac{P_{\text{micro}} - P_{\text{mid}}}{P_{\text{mid}}} \times 10{,}000, \quad \text{OBI}_{20} = \frac{\sum_{i=1}^{20} V_{\text{bid},i} - \sum_{i=1}^{20} V_{\text{ask},i}}{\sum_{i=1}^{20} V_{\text{bid},i} + \sum_{i=1}^{20} V_{\text{ask},i}}$$
 
-### 2. Benchmark Portfolio Beta (Relative to BTC)
-$$\beta_i = \frac{\text{Cov}(R_i, R_{\text{btc}})}{\text{Var}(R_{\text{btc}})}, \quad \beta_p = \sum_{i=1}^N w_i \beta_i = \frac{\text{Cov}(R_p, R_{\text{btc}})}{\text{Var}(R_{\text{btc}})}$$
+### 2. Wall-Protected Stop-Loss & Half-Kelly Sizing (`EXEC <GO>`)
+$$\text{Stop}_{\text{LONG}} = \min\left(P_{\text{entry}} - 1.1\cdot\text{ATR}_{14}, \; P_{\text{BidWall}} - 0.45\cdot\text{ATR}_{14}\right)$$
+$$Q_{\text{pos}} = \frac{\text{Equity} \times \text{Risk\%}}{|P_{\text{entry}} - \text{Stop}|}, \quad f^*_{\text{Half-Kelly}} = \frac{1}{2}\left(p - \frac{1 - p}{b}\right)$$
 
-### 3. Perpetual Funding Rate Heatmap & APR
-$$\text{APR} = \text{FundingRate}_{8h} \times 3 \times 365 \times 100\%$$
-$$\text{APY} = \left[(1 + \text{FundingRate}_{8h})^{1095} - 1\right] \times 100\%$$
-- **Regimes**: `EXTREME_BULL` ($>+50\%$), `MODERATE_BULL` ($+10\%$ to $+50\%$), `NEUTRAL` ($-10\%$ to $+10\%$), `MODERATE_BEAR` ($-50\%$ to $-10\%$), `SHORT_SQUEEZE_RISK` ($<-50\%$).
+### 3. Option Max Pain Strike (`DERIV <GO>`)
+$$S_{\text{MaxPain}} = \arg\min_{S} \left[ \sum_{K < S} (S - K)\cdot \text{OI}_{\text{Call}}(K) + \sum_{K > S} (K - S)\cdot \text{OI}_{\text{Put}}(K) \right]$$
 
-### 4. Institutional Diversification Score ($0 \text{ to } 100$)
-$$DR = \frac{\sum_{i=1}^N w_i \sigma_i}{\sigma_p}, \quad \bar{\rho} = \frac{2}{N(N-1)}\sum_{i < j} \rho_{ij}$$
-$$S_{div} = \text{clamp}\left(100 \times \left[0.6 \times \left(\frac{1 - \bar{\rho}}{2}\right) + 0.4 \times \left(\frac{DR - 1}{\sqrt{N} - 1}\right)\right], 0, 100\right)$$
-
----
-
-## ⌨️ Bloomberg Terminal Command Grammar
-
-| Command | Action | Hotkey |
-| :--- | :--- | :--- |
-| `BTC <GO>` | Live Bitcoin telemetry, quote spread, 24h stats | `F2` |
-| `ETH <GO>` | Ethereum market quote & volume depth | — |
-| `SOL <GO>` | Solana market quote & 24h high/low | — |
-| `RISK <GO>` | Aladdin Risk Matrix: VaR (95%/99%), Beta, Component VaR | `F3` |
-| `FUND <GO>` | Binance Futures Perpetual Funding Rate Heatmap | `F4` |
-| `NEWS <GO>` | Alternative.me Fear & Greed Index & Global Macro | `F5` |
-| `PORT <GO>` | Portfolio holdings, leverage, margin utilization | `F8` |
-| `STRESS <GO>`| Multi-factor stress shock simulation & liquidation radar | — |
-| `HELP <GO>` | Command manual & interactive keyboard shortcuts | `F1` |
+### 4. Parametric Value-at-Risk (`RISK <GO>`)
+$$\sigma_p^2 = \mathbf{w}^T \mathbf{\Sigma} \mathbf{w}, \quad \text{VaR}_{1-\alpha} = \text{PortfolioValue} \times Z_{1-\alpha} \times \sigma_p$$
 
 ---
 
 ## 🚀 Quickstart & Verification
 
 ```bash
-# Clone and enter workspace
-cd /root/.gemini/antigravity-cli/scratch/apex-terminal
-
-# Run 46 verified unit tests
+# Run all 95 unit tests across 25 test suites
 npm test
 
-# Build production TypeScript distribution
+# Build TypeScript & bundle browser production build (dist/web.js)
 npm run build
-
-# Launch terminal
-node dist/index.js
 ```
