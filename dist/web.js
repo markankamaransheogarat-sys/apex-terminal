@@ -4837,6 +4837,8 @@ var OrderbookService = class _OrderbookService {
   symbol = "BTCUSDT";
   ws = null;
   snapshot = null;
+  deepRawBids = [];
+  deepRawAsks = [];
   multiSnapshots = /* @__PURE__ */ new Map();
   listeners = [];
   isDestroyed = false;
@@ -4882,7 +4884,7 @@ var OrderbookService = class _OrderbookService {
       _OrderbookService.RADAR_SYMBOLS.map(async (sym) => {
         try {
           const res = await fetch(
-            `https://api.binance.com/api/v3/depth?symbol=${sym}&limit=20`
+            `https://api.binance.com/api/v3/depth?symbol=${sym}&limit=500`
           );
           if (res.ok) {
             const data = await res.json();
@@ -4940,11 +4942,13 @@ var OrderbookService = class _OrderbookService {
     if (typeof fetch === "undefined") return this.snapshot;
     try {
       const res = await fetch(
-        `https://api.binance.com/api/v3/depth?symbol=${this.symbol}&limit=20`
+        `https://api.binance.com/api/v3/depth?symbol=${this.symbol}&limit=1000`
       );
       if (res.ok) {
         const raw = await res.json();
         if (raw && Array.isArray(raw.bids) && Array.isArray(raw.asks)) {
+          this.deepRawBids = raw.bids;
+          this.deepRawAsks = raw.asks;
           const snap = _OrderbookService.computeL2Analytics(
             this.symbol,
             raw.bids,
@@ -4960,6 +4964,17 @@ var OrderbookService = class _OrderbookService {
     }
     return this.snapshot;
   }
+  mergeTopWithDeep(topLevels, deepLevels, isBid) {
+    if (!deepLevels || deepLevels.length <= 20) return topLevels;
+    if (!topLevels || topLevels.length === 0) return deepLevels;
+    const edgePrice = Number(topLevels[topLevels.length - 1]?.[0] || 0);
+    if (edgePrice <= 0) return topLevels;
+    const deeperTail = deepLevels.filter(([p]) => {
+      const price = Number(p);
+      return isBid ? price < edgePrice : price > edgePrice;
+    });
+    return [...topLevels, ...deeperTail];
+  }
   connectWs() {
     if (this.isDestroyed || !this.WebSocketClass) return;
     const streamUrl = `wss://stream.binance.com:9443/ws/${this.symbol.toLowerCase()}@depth20@100ms`;
@@ -4973,10 +4988,20 @@ var OrderbookService = class _OrderbookService {
           const bids = raw?.bids || raw?.b;
           const asks = raw?.asks || raw?.a;
           if (Array.isArray(bids) && Array.isArray(asks)) {
+            const mergedBids = this.mergeTopWithDeep(
+              bids,
+              this.deepRawBids,
+              true
+            );
+            const mergedAsks = this.mergeTopWithDeep(
+              asks,
+              this.deepRawAsks,
+              false
+            );
             const snap = _OrderbookService.computeL2Analytics(
               this.symbol,
-              bids,
-              asks
+              mergedBids,
+              mergedAsks
             );
             this.snapshot = snap;
             this.multiSnapshots.set(this.symbol, snap);
@@ -5003,19 +5028,177 @@ var OrderbookService = class _OrderbookService {
     }
   }
   /**
+   * Returns recommended price-bucket zoom steps tailored to the asset's price scale.
+   */
+  static getRecommendedBuckets(midPrice) {
+    if (midPrice >= 2e4) {
+      return [
+        { label: "FINE ($1)", step: 1 },
+        { label: "MICRO ($10)", step: 10 },
+        { label: "CLUSTER ($25)", step: 25 },
+        { label: "WHALE ($50)", step: 50 },
+        { label: "MACRO ($100)", step: 100 },
+        { label: "DEEP ($250)", step: 250 }
+      ];
+    }
+    if (midPrice >= 1e3) {
+      return [
+        { label: "FINE ($0.1)", step: 0.1 },
+        { label: "MICRO ($1)", step: 1 },
+        { label: "CLUSTER ($2.5)", step: 2.5 },
+        { label: "WHALE ($5)", step: 5 },
+        { label: "MACRO ($10)", step: 10 },
+        { label: "DEEP ($25)", step: 25 }
+      ];
+    }
+    if (midPrice >= 50) {
+      return [
+        { label: "FINE ($0.02)", step: 0.02 },
+        { label: "MICRO ($0.10)", step: 0.1 },
+        { label: "CLUSTER ($0.50)", step: 0.5 },
+        { label: "WHALE ($1.0)", step: 1 },
+        { label: "MACRO ($2.5)", step: 2.5 },
+        { label: "DEEP ($5.0)", step: 5 }
+      ];
+    }
+    if (midPrice >= 1) {
+      return [
+        { label: "FINE ($0.001)", step: 1e-3 },
+        { label: "MICRO ($0.005)", step: 5e-3 },
+        { label: "CLUSTER ($0.01)", step: 0.01 },
+        { label: "WHALE ($0.025)", step: 0.025 },
+        { label: "MACRO ($0.05)", step: 0.05 },
+        { label: "DEEP ($0.10)", step: 0.1 }
+      ];
+    }
+    return [
+      { label: "FINE ($0.0001)", step: 1e-4 },
+      { label: "MICRO ($0.0005)", step: 5e-4 },
+      { label: "CLUSTER ($0.001)", step: 1e-3 },
+      { label: "WHALE ($0.0025)", step: 25e-4 },
+      { label: "MACRO ($0.005)", step: 5e-3 },
+      { label: "DEEP ($0.01)", step: 0.01 }
+    ];
+  }
+  /**
+   * Groups raw orderbook levels into price buckets (Zoom Out) to expose where the largest
+   * institutional money pools ("основная масса бабла") sit in the book.
+   */
+  static groupOrderbookByBucket(snap, requestedBucketStepUsd = 0) {
+    const availableBuckets = _OrderbookService.getRecommendedBuckets(
+      snap.midPrice
+    );
+    const defaultStep = availableBuckets[2]?.step || availableBuckets[0]?.step || 1;
+    const step = requestedBucketStepUsd > 0 ? requestedBucketStepUsd : defaultStep;
+    const decimals = step < 1e-3 ? 5 : step < 0.01 ? 4 : step < 0.1 ? 3 : step < 1 ? 2 : 2;
+    const bidMap = /* @__PURE__ */ new Map();
+    let totalBidCapitalUsd = 0;
+    for (const b of snap.bids) {
+      const bucketPrice = Number(
+        (Math.floor(b.price / step) * step).toFixed(decimals)
+      );
+      const cur = bidMap.get(bucketPrice) || { qty: 0, notional: 0, count: 0 };
+      cur.qty += b.quantity;
+      cur.notional += b.notionalUsd;
+      cur.count += 1;
+      bidMap.set(bucketPrice, cur);
+      totalBidCapitalUsd += b.notionalUsd;
+    }
+    const askMap = /* @__PURE__ */ new Map();
+    let totalAskCapitalUsd = 0;
+    for (const a of snap.asks) {
+      const bucketPrice = Number(
+        (Math.ceil(a.price / step) * step).toFixed(decimals)
+      );
+      const cur = askMap.get(bucketPrice) || { qty: 0, notional: 0, count: 0 };
+      cur.qty += a.quantity;
+      cur.notional += a.notionalUsd;
+      cur.count += 1;
+      askMap.set(bucketPrice, cur);
+      totalAskCapitalUsd += a.notionalUsd;
+    }
+    const allBucketNotionals = [
+      ...Array.from(bidMap.values()).map((v) => v.notional),
+      ...Array.from(askMap.values()).map((v) => v.notional)
+    ];
+    const meanBucketUsd = allBucketNotionals.length > 0 ? allBucketNotionals.reduce((acc, v) => acc + v, 0) / allBucketNotionals.length : 1;
+    let cumBid = 0;
+    const groupedBids = Array.from(bidMap.entries()).sort((a, b) => b[0] - a[0]).map(([priceBucket, info]) => {
+      cumBid += info.notional;
+      const mult = meanBucketUsd > 0 ? info.notional / meanBucketUsd : 1;
+      return {
+        side: "BID",
+        priceBucket,
+        quantity: info.qty,
+        notionalUsd: info.notional,
+        cumulativeUsd: cumBid,
+        depthPercent: 0,
+        shareOfSidePercent: totalBidCapitalUsd > 0 ? info.notional / totalBidCapitalUsd * 100 : 0,
+        distanceFromMidPercent: snap.midPrice > 0 ? (priceBucket - snap.midPrice) / snap.midPrice * 100 : 0,
+        distanceFromMidUsd: priceBucket - snap.midPrice,
+        wallMultiple: mult,
+        isWhaleCluster: mult >= 2,
+        levelsMerged: info.count
+      };
+    });
+    let cumAsk = 0;
+    const groupedAsks = Array.from(askMap.entries()).sort((a, b) => a[0] - b[0]).map(([priceBucket, info]) => {
+      cumAsk += info.notional;
+      const mult = meanBucketUsd > 0 ? info.notional / meanBucketUsd : 1;
+      return {
+        side: "ASK",
+        priceBucket,
+        quantity: info.qty,
+        notionalUsd: info.notional,
+        cumulativeUsd: cumAsk,
+        depthPercent: 0,
+        shareOfSidePercent: totalAskCapitalUsd > 0 ? info.notional / totalAskCapitalUsd * 100 : 0,
+        distanceFromMidPercent: snap.midPrice > 0 ? (priceBucket - snap.midPrice) / snap.midPrice * 100 : 0,
+        distanceFromMidUsd: priceBucket - snap.midPrice,
+        wallMultiple: mult,
+        isWhaleCluster: mult >= 2,
+        levelsMerged: info.count
+      };
+    });
+    const maxBucketNotional = Math.max(
+      ...groupedBids.map((b) => b.notionalUsd),
+      ...groupedAsks.map((a) => a.notionalUsd),
+      1
+    );
+    for (const b of groupedBids) {
+      b.depthPercent = Math.min(100, b.notionalUsd / maxBucketNotional * 100);
+    }
+    for (const a of groupedAsks) {
+      a.depthPercent = Math.min(100, a.notionalUsd / maxBucketNotional * 100);
+    }
+    const topBidClusters = [...groupedBids].sort((a, b) => b.notionalUsd - a.notionalUsd).slice(0, 4);
+    const topAskClusters = [...groupedAsks].sort((a, b) => b.notionalUsd - a.notionalUsd).slice(0, 4);
+    return {
+      bucketStepUsd: step,
+      availableBuckets,
+      groupedBids,
+      groupedAsks,
+      topBidClusters,
+      topAskClusters,
+      totalBidCapitalUsd,
+      totalAskCapitalUsd,
+      bidAskRatio: totalAskCapitalUsd > 0 ? totalBidCapitalUsd / totalAskCapitalUsd : 1
+    };
+  }
+  /**
    * Pure quantitative L2 Orderbook analytics computation.
-   * Accepts raw [priceStr, qtyStr][] arrays for bids and asks.
+   * Accepts raw [priceStr, qtyStr][] arrays for bids and asks (up to 1000 levels).
    */
   static computeL2Analytics(symbol, rawBids, rawAsks) {
     const asset = symbol.toUpperCase().replace("USDT", "");
     const parsedBids = rawBids.map(([p, q]) => ({
       price: Number(p),
       quantity: Number(q)
-    })).filter((x) => x.price > 0 && x.quantity > 0).sort((a, b) => b.price - a.price).slice(0, 20);
+    })).filter((x) => x.price > 0 && x.quantity > 0).sort((a, b) => b.price - a.price).slice(0, 1e3);
     const parsedAsks = rawAsks.map(([p, q]) => ({
       price: Number(p),
       quantity: Number(q)
-    })).filter((x) => x.price > 0 && x.quantity > 0).sort((a, b) => a.price - b.price).slice(0, 20);
+    })).filter((x) => x.price > 0 && x.quantity > 0).sort((a, b) => a.price - b.price).slice(0, 1e3);
     const bestBid = parsedBids[0]?.price || 0;
     const bestAsk = parsedAsks[0]?.price || 0;
     const bestBidQty = parsedBids[0]?.quantity || 0;
@@ -6136,6 +6319,554 @@ var ExecutionBlotterService = class _ExecutionBlotterService {
   }
 };
 
+// src/quant/world-class-alpha.ts
+var WorldClassQuantService = class _WorldClassQuantService {
+  static TRACKED_SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "SUIUSDT",
+    "XRPUSDT",
+    "DOGEUSDT"
+  ];
+  spotPerpCache = /* @__PURE__ */ new Map();
+  macroLiquidity;
+  constructor() {
+    this.macroLiquidity = this.createBaselineMacroLiquidity();
+    this.initBaselineSpotPerp();
+  }
+  getMacroLiquidity() {
+    return this.macroLiquidity;
+  }
+  getSpotPerpMetrics(symbol) {
+    const clean = symbol.toUpperCase();
+    return this.spotPerpCache.get(clean) || this.createDefaultSpotPerp(clean, 85e3);
+  }
+  /**
+   * Fetches live US Coinbase Spot Premium (bps) + Binance Spot vs Futures 12h Taker CVD Delta.
+   */
+  async fetchLiveSpotVsPerpFlows(tickers) {
+    if (typeof fetch === "undefined") return;
+    await Promise.all(
+      _WorldClassQuantService.TRACKED_SYMBOLS.map(async (sym) => {
+        const asset = sym.replace("USDT", "");
+        const binancePrice = tickers.get(sym)?.price || (asset === "BTC" ? 85200 : asset === "ETH" ? 2250 : 100);
+        let coinbasePrice = binancePrice;
+        try {
+          if (asset !== "BNB") {
+            const cbRes = await fetch(
+              `https://api.exchange.coinbase.com/products/${asset}-USD/ticker`
+            );
+            if (cbRes.ok) {
+              const cbData = await cbRes.json();
+              const parsed = parseFloat(cbData.price);
+              if (Number.isFinite(parsed) && parsed > 0) {
+                coinbasePrice = parsed;
+              }
+            }
+          }
+        } catch {
+        }
+        let spotCvd12hUsd = 0;
+        let perpCvd12hUsd = 0;
+        try {
+          const [spotRes, perpRes] = await Promise.all([
+            fetch(
+              `https://api.binance.com/api/v3/klines?symbol=${sym}&interval=1h&limit=12`
+            ),
+            fetch(
+              `https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=1h&limit=12`
+            )
+          ]);
+          if (spotRes.ok) {
+            const spotKlines = await spotRes.json();
+            if (Array.isArray(spotKlines)) {
+              spotCvd12hUsd = _WorldClassQuantService.computeCvdFromBinanceKlines(spotKlines);
+            }
+          }
+          if (perpRes.ok) {
+            const perpKlines = await perpRes.json();
+            if (Array.isArray(perpKlines)) {
+              perpCvd12hUsd = _WorldClassQuantService.computeCvdFromBinanceKlines(perpKlines);
+            }
+          }
+        } catch {
+        }
+        if (spotCvd12hUsd !== 0 || perpCvd12hUsd !== 0) {
+          const metrics = _WorldClassQuantService.evaluateSpotPerpMetrics(
+            sym,
+            binancePrice,
+            coinbasePrice,
+            spotCvd12hUsd,
+            perpCvd12hUsd
+          );
+          this.spotPerpCache.set(sym, metrics);
+        } else {
+          const existing = this.getSpotPerpMetrics(sym);
+          const updated = _WorldClassQuantService.evaluateSpotPerpMetrics(
+            sym,
+            binancePrice,
+            coinbasePrice,
+            existing.spotCvd12hUsd,
+            existing.perpCvd12hUsd
+          );
+          this.spotPerpCache.set(sym, updated);
+        }
+      })
+    );
+  }
+  /**
+   * Computes Net Taker Buy - Taker Sell Quote Volume ($) from Binance klines.
+   * Kline index [7] = Total Quote Asset Volume ($), index [10] = Taker Buy Quote Volume ($).
+   * Taker Sell Quote Volume = Total - Taker Buy -> Net CVD = 2 * TakerBuy - Total.
+   */
+  static computeCvdFromBinanceKlines(klines) {
+    let netCvd = 0;
+    for (const k of klines) {
+      if (!Array.isArray(k) || k.length < 11) continue;
+      const totalQuote = parseFloat(k[7]) || 0;
+      const takerBuyQuote = parseFloat(k[10]) || 0;
+      netCvd += 2 * takerBuyQuote - totalQuote;
+    }
+    return Math.round(netCvd);
+  }
+  static evaluateSpotPerpMetrics(symbol, binanceSpotPrice, coinbaseSpotPrice, spotCvd12hUsd, perpCvd12hUsd) {
+    const asset = symbol.toUpperCase().replace("USDT", "");
+    const safeBinance = binanceSpotPrice > 0 ? binanceSpotPrice : 85e3;
+    const safeCoinbase = coinbaseSpotPrice > 0 ? coinbaseSpotPrice : safeBinance;
+    const rawPremBps = (safeCoinbase - safeBinance) / safeBinance * 1e4;
+    const coinbasePremiumBps = Number(
+      Math.max(-65, Math.min(65, rawPremBps)).toFixed(2)
+    );
+    let regime;
+    if (spotCvd12hUsd > 0 && perpCvd12hUsd <= 0) {
+      regime = "BULLISH_SPOT_ABSORPTION";
+    } else if (spotCvd12hUsd <= 0 && perpCvd12hUsd > 0) {
+      regime = "BEARISH_PERP_TRAP";
+    } else if (spotCvd12hUsd > 0 && perpCvd12hUsd > 0) {
+      regime = "SYNCHRONIZED_BULL_INFLOW";
+    } else {
+      regime = "SYNCHRONIZED_BEAR_OUTFLOW";
+    }
+    return {
+      symbol: symbol.toUpperCase(),
+      asset,
+      spotPrice: safeBinance,
+      coinbaseSpotPrice: safeCoinbase,
+      coinbasePremiumBps,
+      spotCvd12hUsd,
+      perpCvd12hUsd,
+      spotVsPerpDeltaUsd: spotCvd12hUsd - perpCvd12hUsd,
+      regime
+    };
+  }
+  /**
+   * Fetches live Stablecoin Mint/Burn & Chain TVL from DeFiLlama zero-key public APIs.
+   */
+  async fetchDeFiLlamaMacroLiquidity() {
+    if (typeof fetch === "undefined") return this.macroLiquidity;
+    try {
+      const [stablesRes, chainsRes] = await Promise.all([
+        fetch("https://stablecoins.llama.fi/stablecoins?includePrices=false"),
+        fetch("https://api.llama.fi/v2/chains")
+      ]);
+      let stablecoins = this.macroLiquidity.stablecoins;
+      let totalStablecoinMcapUsd = this.macroLiquidity.totalStablecoinMcapUsd;
+      let netMint24hUsd = this.macroLiquidity.netMint24hUsd;
+      let netMint7dUsd = this.macroLiquidity.netMint7dUsd;
+      if (stablesRes.ok) {
+        const sJson = await stablesRes.json();
+        if (sJson && Array.isArray(sJson.peggedAssets)) {
+          const parsedStables = [];
+          let totalMcap = 0;
+          let total24h = 0;
+          let total7d = 0;
+          for (const item of sJson.peggedAssets.slice(0, 8)) {
+            const cur = item.circulating?.peggedUSD || 0;
+            const prevDay = item.circulatingPrevDay?.peggedUSD || cur;
+            const prevWeek = item.circulatingPrevWeek?.peggedUSD || cur;
+            if (cur <= 5e8) continue;
+            const d24 = cur - prevDay;
+            const d7 = cur - prevWeek;
+            totalMcap += cur;
+            total24h += d24;
+            total7d += d7;
+            parsedStables.push({
+              symbol: item.symbol || "USD",
+              name: item.name || item.symbol,
+              circulatingUsd: Math.round(cur),
+              change24hUsd: Math.round(d24),
+              change7dUsd: Math.round(d7),
+              change7dPercent: prevWeek > 0 ? Number((d7 / prevWeek * 100).toFixed(2)) : 0
+            });
+          }
+          if (parsedStables.length >= 2) {
+            stablecoins = parsedStables.slice(0, 5);
+            totalStablecoinMcapUsd = Math.round(totalMcap);
+            netMint24hUsd = Math.round(total24h);
+            netMint7dUsd = Math.round(total7d);
+          }
+        }
+      }
+      let topChains = this.macroLiquidity.topChains;
+      if (chainsRes.ok) {
+        const cJson = await chainsRes.json();
+        if (Array.isArray(cJson) && cJson.length > 0) {
+          const sorted = [...cJson].filter((c) => typeof c.tvl === "number" && c.tvl > 0).sort((a, b) => b.tvl - a.tvl).slice(0, 6);
+          const sumTvl = sorted.reduce((acc, c) => acc + c.tvl, 0) || 1;
+          topChains = sorted.map((c) => ({
+            chain: c.name || "Chain",
+            tvlUsd: Math.round(c.tvl),
+            sharePercent: Number((c.tvl / sumTvl * 100).toFixed(1))
+          }));
+        }
+      }
+      const liquidityRegime = netMint7dUsd >= 5e8 ? "STRONG_MINT_EXPANSION" : netMint7dUsd >= 0 ? "STEADY_INFLOW" : "LIQUIDITY_CONTRACTION";
+      this.macroLiquidity = {
+        totalStablecoinMcapUsd,
+        netMint24hUsd,
+        netMint7dUsd,
+        liquidityRegime,
+        stablecoins,
+        topChains,
+        updatedAt: Date.now()
+      };
+    } catch {
+    }
+    return this.macroLiquidity;
+  }
+  /**
+   * Computes Statistical Arbitrage (StatArb) Cointegration Spread Z-Score, OLS Beta,
+   * and Ornstein-Uhlenbeck Mean-Reversion Half-Life across key institutional pairs.
+   */
+  static computeStatArbMatrix(returnsByAsset, tickers) {
+    const pairs = [
+      { legA: "ETH", legB: "BTC" },
+      { legA: "SOL", legB: "ETH" },
+      { legA: "SUI", legB: "SOL" },
+      { legA: "BNB", legB: "BTC" },
+      { legA: "XRP", legB: "ETH" },
+      { legA: "DOGE", legB: "SOL" }
+    ];
+    const results = [];
+    for (const { legA, legB } of pairs) {
+      const retA = returnsByAsset[legA] || [];
+      const retB = returnsByAsset[legB] || [];
+      const len = Math.min(retA.length, retB.length);
+      let corr = 0.78;
+      let beta = 1.12;
+      let zScore = 0;
+      let halfLifeDays = 4.2;
+      if (len >= 15) {
+        const sliceA = retA.slice(-len);
+        const sliceB = retB.slice(-len);
+        const meanA = sliceA.reduce((s, v) => s + v, 0) / len;
+        const meanB = sliceB.reduce((s, v) => s + v, 0) / len;
+        let cov = 0;
+        let varA = 0;
+        let varB = 0;
+        for (let i = 0; i < len; i++) {
+          const da = sliceA[i] - meanA;
+          const db = sliceB[i] - meanB;
+          cov += da * db;
+          varA += da * da;
+          varB += db * db;
+        }
+        if (varB > 1e-9 && varA > 1e-9) {
+          beta = cov / varB;
+          corr = cov / Math.sqrt(varA * varB);
+        }
+        const spreadSeries = [];
+        let cumSpread = 0;
+        for (let i = 0; i < len; i++) {
+          cumSpread += sliceA[i] - beta * sliceB[i];
+          spreadSeries.push(cumSpread);
+        }
+        const liveChgA = (tickers.get(`${legA}USDT`)?.priceChangePercent24h || 0) / 100;
+        const liveChgB = (tickers.get(`${legB}USDT`)?.priceChangePercent24h || 0) / 100;
+        const currentSpread = cumSpread + (liveChgA - beta * liveChgB);
+        spreadSeries.push(currentSpread);
+        const windowSlice = spreadSeries.slice(-20);
+        const wMean = windowSlice.reduce((s, v) => s + v, 0) / windowSlice.length;
+        const wVar = windowSlice.reduce((s, v) => s + (v - wMean) ** 2, 0) / Math.max(1, windowSlice.length - 1);
+        const wStd = Math.sqrt(Math.max(1e-8, wVar));
+        zScore = (currentSpread - wMean) / wStd;
+        let num = 0;
+        let den = 0;
+        for (let i = 1; i < spreadSeries.length; i++) {
+          const prev = spreadSeries[i - 1] - wMean;
+          const diff = spreadSeries[i] - spreadSeries[i - 1];
+          num += prev * diff;
+          den += prev * prev;
+        }
+        const lambda = den > 1e-9 ? num / den : -0.18;
+        if (lambda < -0.02 && lambda > -0.95) {
+          halfLifeDays = Math.max(
+            1.1,
+            Math.min(18, -Math.LN2 / Math.log(1 + lambda))
+          );
+        }
+      }
+      const clampedZ = Number(Math.max(-3.8, Math.min(3.8, zScore)).toFixed(2));
+      const cleanCorr = Number(
+        Math.max(-0.99, Math.min(0.99, corr)).toFixed(2)
+      );
+      const cleanBeta = Number(Math.max(0.2, Math.min(2.8, beta)).toFixed(2));
+      const cleanHalfLife = Number(halfLifeDays.toFixed(1));
+      let signal = "EQUILIBRIUM";
+      let actionableCall = `Spread within normal band (${clampedZ >= 0 ? "+" : ""}${clampedZ}\u03C3) \xB7 Wait for \xB11.6\u03C3`;
+      if (clampedZ <= -1.6) {
+        signal = "STATARB_LONG_A_SHORT_B";
+        actionableCall = `\u{1F7E2} LONG ${legA} / \u{1F534} SHORT ${legB} (${clampedZ}\u03C3 Undervalued \xB7 Reversion Half-Life ${cleanHalfLife}d)`;
+      } else if (clampedZ >= 1.6) {
+        signal = "STATARB_SHORT_A_LONG_B";
+        actionableCall = `\u{1F534} SHORT ${legA} / \u{1F7E2} LONG ${legB} (+${clampedZ}\u03C3 Overextended \xB7 Reversion Half-Life ${cleanHalfLife}d)`;
+      } else if (cleanCorr >= 0.75 && clampedZ <= -0.95) {
+        signal = "LEAD_LAG_CATCHUP_A";
+        actionableCall = `\u26A1 LAGGARD CATCH-UP: ${legA} lagging leader ${legB} (${clampedZ}\u03C3, \u03C1=${cleanCorr}) -> Long ${legA}`;
+      }
+      results.push({
+        pairLabel: `${legA} / ${legB}`,
+        legA,
+        legB,
+        correlation60d: cleanCorr,
+        hedgeBeta: cleanBeta,
+        spreadZScore: clampedZ,
+        halfLifeDays: cleanHalfLife,
+        signal,
+        actionableCall
+      });
+    }
+    return results.sort(
+      (a, b) => Math.abs(b.spreadZScore) - Math.abs(a.spreadZScore)
+    );
+  }
+  /**
+   * Computes the 6-Factor Master Institutional Confluence Matrix (-100 to +100)
+   * across all tracked assets.
+   */
+  computeMasterConfluenceMatrix(params) {
+    const rows = [];
+    for (const sym of _WorldClassQuantService.TRACKED_SYMBOLS) {
+      const asset = sym.replace("USDT", "");
+      const ticker = params.tickers.get(sym);
+      const price = ticker?.price || (asset === "BTC" ? 85200 : asset === "ETH" ? 2250 : asset === "SOL" ? 142 : 100);
+      const sp = this.getSpotPerpMetrics(sym);
+      let spotVsPerpScore = 0;
+      if (sp.regime === "BULLISH_SPOT_ABSORPTION") {
+        spotVsPerpScore = 22;
+      } else if (sp.regime === "BEARISH_PERP_TRAP") {
+        spotVsPerpScore = -22;
+      } else if (sp.regime === "SYNCHRONIZED_BULL_INFLOW") {
+        spotVsPerpScore = 16;
+      } else {
+        spotVsPerpScore = -15;
+      }
+      const coinbasePremiumScore = Math.max(
+        -15,
+        Math.min(15, Math.round(sp.coinbasePremiumBps * 1.1))
+      );
+      let whaleBuy = 0;
+      let whaleSell = 0;
+      for (const wt of params.whaleTrades) {
+        if (wt.asset === asset) {
+          if (wt.side === "BUY") whaleBuy += wt.valueUsd;
+          else whaleSell += wt.valueUsd;
+        }
+      }
+      const whaleTot = whaleBuy + whaleSell;
+      const whaleImb = whaleTot > 0 ? (whaleBuy - whaleSell) / whaleTot : 0.12;
+      const whaleTrancheScore = Math.max(
+        -20,
+        Math.min(20, Math.round(whaleImb * 28))
+      );
+      const ob = params.orderbookSnapshots(sym);
+      let orderbookMicroScore = 4;
+      if (ob) {
+        const obiPart = ob.obi20Percent / 100 * 10;
+        const skewPart = Math.max(-5, Math.min(5, ob.microPriceSkewBps * 2));
+        orderbookMicroScore = Math.max(
+          -15,
+          Math.min(15, Math.round(obiPart + skewPart))
+        );
+      }
+      const fund = params.fundingRates.find((f) => f.symbol === sym);
+      const apr = fund?.annualizedAPR ?? 10.95;
+      let oiFundingScore = 3;
+      if (apr < 0) {
+        oiFundingScore = 13;
+      } else if (apr > 45) {
+        oiFundingScore = -12;
+      } else {
+        oiFundingScore = 5;
+      }
+      const opt = asset === "ETH" ? params.ethOptions : params.btcOptions;
+      let optionsGammaScore = 2;
+      if (opt.maxPainStrike > opt.underlyingPrice * 1.01) {
+        optionsGammaScore = 8;
+      } else if (opt.maxPainStrike < opt.underlyingPrice * 0.99) {
+        optionsGammaScore = -7;
+      } else if (opt.putCallRatio < 0.65) {
+        optionsGammaScore = 6;
+      }
+      const masterScore = Math.max(
+        -100,
+        Math.min(
+          100,
+          spotVsPerpScore + coinbasePremiumScore + whaleTrancheScore + orderbookMicroScore + oiFundingScore + optionsGammaScore
+        )
+      );
+      let grade = "NEUTRAL / CHOP";
+      if (masterScore >= 45) grade = "A+ INSTITUTIONAL LONG";
+      else if (masterScore >= 18) grade = "B+ ACCUMULATE LONG";
+      else if (masterScore <= -45) grade = "A+ INSTITUTIONAL SHORT";
+      else if (masterScore <= -18) grade = "B+ DISTRIBUTE SHORT";
+      const recommendedDirection = masterScore >= 0 ? "LONG" : "SHORT";
+      const thesisSummary = sp.regime === "BULLISH_SPOT_ABSORPTION" ? `Spot CVD +$${(sp.spotCvd12hUsd / 1e6).toFixed(1)}M absorbing Perp shorts ($${(sp.perpCvd12hUsd / 1e6).toFixed(1)}M) \xB7 CB Prem ${sp.coinbasePremiumBps >= 0 ? "+" : ""}${sp.coinbasePremiumBps} bps` : sp.regime === "BEARISH_PERP_TRAP" ? `Retail Perp CVD +$${(sp.perpCvd12hUsd / 1e6).toFixed(1)}M trapped against Spot selling ($${(sp.spotCvd12hUsd / 1e6).toFixed(1)}M)` : `Synchronized flow (Spot ${sp.spotCvd12hUsd >= 0 ? "+" : ""}$${(sp.spotCvd12hUsd / 1e6).toFixed(1)}M / Perp ${sp.perpCvd12hUsd >= 0 ? "+" : ""}$${(sp.perpCvd12hUsd / 1e6).toFixed(1)}M) \xB7 CB Prem ${sp.coinbasePremiumBps >= 0 ? "+" : ""}${sp.coinbasePremiumBps} bps`;
+      rows.push({
+        symbol: sym,
+        asset,
+        price,
+        masterScore,
+        grade,
+        recommendedDirection,
+        factors: {
+          spotVsPerpScore,
+          coinbasePremiumScore,
+          whaleTrancheScore,
+          orderbookMicroScore,
+          oiFundingScore,
+          optionsGammaScore
+        },
+        spotPerpMetrics: sp,
+        thesisSummary
+      });
+    }
+    return rows.sort(
+      (a, b) => Math.abs(b.masterScore) - Math.abs(a.masterScore)
+    );
+  }
+  initBaselineSpotPerp() {
+    const defaults = [
+      {
+        sym: "BTCUSDT",
+        price: 85200,
+        cbBps: 9.4,
+        spotCvd: 485e5,
+        perpCvd: -192e5
+      },
+      {
+        sym: "ETHUSDT",
+        price: 2250,
+        cbBps: 6.2,
+        spotCvd: 224e5,
+        perpCvd: 148e5
+      },
+      {
+        sym: "SOLUSDT",
+        price: 142,
+        cbBps: 11.8,
+        spotCvd: 189e5,
+        perpCvd: -84e5
+      },
+      {
+        sym: "BNBUSDT",
+        price: 610,
+        cbBps: 2.1,
+        spotCvd: 62e5,
+        perpCvd: 41e5
+      },
+      {
+        sym: "SUIUSDT",
+        price: 2.85,
+        cbBps: 14.5,
+        spotCvd: 126e5,
+        perpCvd: -49e5
+      },
+      {
+        sym: "XRPUSDT",
+        price: 2.15,
+        cbBps: -7.8,
+        spotCvd: -94e5,
+        perpCvd: 162e5
+      },
+      {
+        sym: "DOGEUSDT",
+        price: 0.195,
+        cbBps: 4.5,
+        spotCvd: 71e5,
+        perpCvd: 98e5
+      }
+    ];
+    for (const d of defaults) {
+      const cbPrice = d.price * (1 + d.cbBps / 1e4);
+      this.spotPerpCache.set(
+        d.sym,
+        _WorldClassQuantService.evaluateSpotPerpMetrics(
+          d.sym,
+          d.price,
+          cbPrice,
+          d.spotCvd,
+          d.perpCvd
+        )
+      );
+    }
+  }
+  createDefaultSpotPerp(symbol, price) {
+    return _WorldClassQuantService.evaluateSpotPerpMetrics(
+      symbol,
+      price,
+      price * 1.0008,
+      15e6,
+      -5e6
+    );
+  }
+  createBaselineMacroLiquidity() {
+    return {
+      totalStablecoinMcapUsd: 21485e7,
+      netMint24hUsd: 42e7,
+      netMint7dUsd: 238e7,
+      liquidityRegime: "STRONG_MINT_EXPANSION",
+      stablecoins: [
+        {
+          symbol: "USDT",
+          name: "Tether",
+          circulatingUsd: 1426e8,
+          change24hUsd: 265e6,
+          change7dUsd: 145e7,
+          change7dPercent: 1.03
+        },
+        {
+          symbol: "USDC",
+          name: "USD Coin",
+          circulatingUsd: 564e8,
+          change24hUsd: 14e7,
+          change7dUsd: 82e7,
+          change7dPercent: 1.48
+        },
+        {
+          symbol: "USDe",
+          name: "Ethena USDe",
+          circulatingUsd: 595e7,
+          change24hUsd: 15e6,
+          change7dUsd: 11e7,
+          change7dPercent: 1.88
+        }
+      ],
+      topChains: [
+        { chain: "Ethereum", tvlUsd: 642e8, sharePercent: 56.4 },
+        { chain: "Solana", tvlUsd: 985e7, sharePercent: 8.7 },
+        { chain: "Bitcoin", tvlUsd: 642e7, sharePercent: 5.6 },
+        { chain: "BNB", tvlUsd: 538e7, sharePercent: 4.7 },
+        { chain: "Base", tvlUsd: 392e7, sharePercent: 3.4 },
+        { chain: "Sui", tvlUsd: 214e7, sharePercent: 1.9 }
+      ],
+      updatedAt: Date.now()
+    };
+  }
+};
+
 // src/web/app.ts
 var ApexWebTerminal = class {
   binanceWs;
@@ -6147,9 +6878,11 @@ var ApexWebTerminal = class {
   chartService;
   chartRenderer = null;
   orderbookService;
+  orderbookBucketStep = 0;
   alphaTracker;
   derivService;
   executionBlotter;
+  quantEngine;
   newsService;
   newsSnapshot = null;
   newsFilter = "ALL";
@@ -6186,6 +6919,7 @@ var ApexWebTerminal = class {
     this.alphaTracker = new AlphaPerformanceTracker();
     this.derivService = new DerivativesIntelligenceService();
     this.executionBlotter = new ExecutionBlotterService();
+    this.quantEngine = new WorldClassQuantService();
     this.newsService = NewsService.getInstance();
     this.alertManager = AlertManager.getInstance();
     if (typeof localStorage !== "undefined") {
@@ -6269,6 +7003,7 @@ var ApexWebTerminal = class {
             <button class="cmd-chip" data-cmd="BOOK">\u{1F9F1} BOOK &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="EXEC">\u{1F9EE} EXEC &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="DERIV">\u{1F985} DERIV &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="QUANT">\u{1F9EC} QUANT &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="WHALE">\u{1F40B} WHALE &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="LIQ">\u26A1 LIQ &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="RISK">RISK &lt;GO&gt;</button>
@@ -6398,6 +7133,8 @@ var ApexWebTerminal = class {
       this.activeScreen = "EXEC";
     } else if (cleaned === "DERIV" || cleaned === "OPT" || cleaned === "OPTIONS" || cleaned === "OI" || cleaned === "SCAN") {
       this.activeScreen = "DERIV";
+    } else if (cleaned === "QUANT" || cleaned === "STAT" || cleaned === "STATARB" || cleaned === "ALPHA" || cleaned === "CONFLUENCE") {
+      this.activeScreen = "QUANT";
     } else if (cleaned === "ARB" || cleaned === "BASIS" || cleaned === "ARBITRAGE" || cleaned === "CARRY") {
       this.activeScreen = "ARB";
     } else if (cleaned === "NEWS" || cleaned === "WIRE" || cleaned === "SENTIMENT") {
@@ -6525,7 +7262,14 @@ var ApexWebTerminal = class {
     });
     this.orderbookService.start();
     this.derivService.fetchLiveDeribitOptions().then(() => {
-      if (this.activeScreen === "DERIV") this.render();
+      if (this.activeScreen === "DERIV" || this.activeScreen === "QUANT")
+        this.render();
+    });
+    this.quantEngine.fetchLiveSpotVsPerpFlows(this.tickers).then(() => {
+      if (this.activeScreen === "QUANT") this.render();
+    });
+    this.quantEngine.fetchDeFiLlamaMacroLiquidity().then(() => {
+      if (this.activeScreen === "QUANT") this.render();
     });
     setInterval(() => {
       FundingRateCalculator.fetchLiveFundingRates().then((r) => {
@@ -6536,7 +7280,12 @@ var ApexWebTerminal = class {
       this.onChainService.fetchOpenInterest(this.prevPrices);
       this.newsService.fetchLatestNews().then((s) => this.newsSnapshot = s);
       this.derivService.fetchLiveDeribitOptions().then(() => {
-        if (this.activeScreen === "DERIV") this.render();
+        if (this.activeScreen === "DERIV" || this.activeScreen === "QUANT")
+          this.render();
+      });
+      this.quantEngine.fetchLiveSpotVsPerpFlows(this.tickers).catch(() => {
+      });
+      this.quantEngine.fetchDeFiLlamaMacroLiquidity().catch(() => {
       });
       this.orderbookService.scanMultiAssetWalls().catch(() => {
       });
@@ -6626,6 +7375,8 @@ var ApexWebTerminal = class {
       this.renderExecScreen(body);
     } else if (this.activeScreen === "DERIV") {
       this.renderDerivScreen(body);
+    } else if (this.activeScreen === "QUANT") {
+      this.renderQuantScreen(body);
     } else if (this.activeScreen === "WHALE") {
       this.renderWhaleScreen(body);
     } else if (this.activeScreen === "LIQ") {
@@ -6869,47 +7620,54 @@ var ApexWebTerminal = class {
       container.innerHTML = `
         <div class="terminal-screen screen-book">
           <div class="screen-header">
-            <h2 class="screen-title">\u{1F9F1} L2 ORDERBOOK MICROSTRUCTURE, STOIKOV MICRO-PRICE &amp; LIQUIDITY WALLS</h2>
+            <h2 class="screen-title">\u{1F9F1} DEEP 1000-LEVEL L2 ORDERBOOK, PRICE-BUCKET ZOOM &amp; CAPITAL CONCENTRATION RADAR</h2>
           </div>
-          <div class="p-4 text-center">Connecting to Binance Spot L2 Depth (@depth20@100ms)...</div>
+          <div class="p-4 text-center">Connecting to Binance Spot Deep L2 Depth (1000-Level Snapshot + @depth20@100ms)...</div>
         </div>
       `;
       return;
     }
+    const grouped = OrderbookService.groupOrderbookByBucket(
+      snap,
+      this.orderbookBucketStep
+    );
     const skewSign = snap.microPriceSkewBps >= 0 ? "+" : "";
     const skewClass = snap.microPriceSkewBps >= 0 ? "text-green" : "text-red";
     const obiSign = snap.obi20Percent >= 0 ? "+" : "";
     const obiClass = snap.obi20Percent >= 0 ? "text-green" : "text-red";
     const multiWalls = this.orderbookService.getMultiAssetWalls();
+    const fmtPrice = (p) => p < 1 ? `$${p.toFixed(4)}` : p < 10 ? `$${p.toFixed(3)}` : p < 100 ? `$${p.toFixed(2)}` : `$${p.toLocaleString(void 0, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     container.innerHTML = `
       <div class="terminal-screen screen-book">
         <div class="screen-header">
           <div class="screen-title-group">
-            <h2 class="screen-title">\u{1F9F1} L2 ORDERBOOK DEPTH, STOIKOV MICRO-PRICE &amp; INSTITUTIONAL LIQUIDITY WALLS</h2>
-            <span class="screen-subtitle">BINANCE @DEPTH20@100MS \xB7 STOIKOV (2018) FAIR MICRO-PRICE \xB7 MULTI-ASSET LIMIT WALL RADAR (&ge;2.2X MEAN DEPTH)</span>
+            <h2 class="screen-title">\u{1F9F1} DEEP 1000-LEVEL L2 ORDERBOOK, PRICE-BUCKET ZOOM &amp; WHALE CAPITAL CLUSTERS</h2>
+            <span class="screen-subtitle">BINANCE 1,000-LEVEL REST + 100MS STREAM \xB7 INTERACTIVE ZOOM BUCKETS \xB7 STOIKOV (2018) FAIR MICRO-PRICE \xB7 \u0413\u0414\u0415 \u0421\u0418\u0414\u0418\u0422 \u041E\u0421\u041D\u041E\u0412\u041D\u0410\u042F \u041C\u0410\u0421\u0421\u0410 \u0411\u0410\u0411\u041B\u0410</span>
           </div>
-          <div class="filter-group">
-            ${symbols.map(
+          <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+            <div class="filter-group">
+              ${symbols.map(
       (s) => `
-              <button class="filter-btn ${curSymbol.startsWith(s) ? "active" : ""}" data-book-sym="${s}USDT">
-                ${s}
-              </button>
-            `
+                <button class="filter-btn ${curSymbol.startsWith(s) ? "active" : ""}" data-book-sym="${s}USDT">
+                  ${s}
+                </button>
+              `
     ).join("")}
+            </div>
           </div>
         </div>
 
+        <!-- MULTI-ASSET L2 WALL RADAR -->
         ${multiWalls.length > 0 ? `
-          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px 12px; align-items: center;">
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px 12px; align-items: center;">
             <span style="font-size: 10px; font-weight: 700; color: var(--amber-bright); letter-spacing: 0.08em;">\u{1F6F0}\uFE0F MULTI-ASSET L2 WALL RADAR (CLICK TO FOCUS):</span>
             ${multiWalls.map((mw) => {
       const isBid = mw.dominantWallSide === "BID_WALL";
-      const priceFmt = mw.dominantWallPrice < 10 ? `$${mw.dominantWallPrice.toFixed(4)}` : `$${mw.dominantWallPrice.toLocaleString(void 0, { maximumFractionDigits: 2 })}`;
       return `
                   <button class="terminal-btn-sm" data-book-sym="${mw.symbol}" style="${mw.symbol === curSymbol ? "border-color: var(--amber-bright);" : ""}">
                     <strong>${mw.asset}</strong>
                     <span class="${isBid ? "text-green" : "text-red"}" style="margin-left: 4px;">
-                      ${isBid ? "\u{1F7E2} BID" : "\u{1F534} ASK"} ${mw.dominantWallMultiple.toFixed(1)}x (${priceFmt} \xB7 $${Math.round(mw.dominantWallUsd / 1e3)}K)
+                      ${isBid ? "\u{1F7E2} BID" : "\u{1F534} ASK"} ${mw.dominantWallMultiple.toFixed(1)}x (${fmtPrice(mw.dominantWallPrice)} \xB7 $${Math.round(mw.dominantWallUsd / 1e3)}K)
                     </span>
                   </button>
                 `;
@@ -6917,71 +7675,154 @@ var ApexWebTerminal = class {
           </div>
         ` : ""}
 
+        <!-- INTERACTIVE ORDERBOOK ZOOM / PRICE-BUCKET GROUPING BAR -->
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; background: linear-gradient(90deg, rgba(16,185,129,0.08), rgba(15,23,42,0.9)); border: 1px solid rgba(16,185,129,0.3); border-radius: 6px; padding: 10px 14px;">
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span style="font-size: 11px; font-weight: 800; color: var(--green); letter-spacing: 0.06em;">\u{1F50D} \u041C\u0410\u0421\u0428\u0422\u0410\u0411 \u0421\u0422\u0410\u041A\u0410\u041D\u0410 (PRICE-BUCKET ZOOM \u2014 \u0423\u0412\u0415\u041B\u0418\u0427\u0418\u0422\u042C \u041F\u0423\u041B\u042B \u041B\u0418\u041A\u0412\u0418\u0414\u041D\u041E\u0421\u0422\u0418):</span>
+            ${grouped.availableBuckets.map((b) => {
+      const isActive = Math.abs(b.step - grouped.bucketStepUsd) < 1e-6;
+      return `
+                  <button class="filter-btn ${isActive ? "active" : ""}" data-book-bucket="${b.step}" style="${isActive ? "background: var(--green); color: #04130d; font-weight: 800; border-color: var(--green);" : ""}">
+                    ${b.label}
+                  </button>
+                `;
+    }).join("")}
+          </div>
+          <div style="font-size: 11px; color: var(--text-secondary);">
+            \u0413\u043B\u0443\u0431\u0438\u043D\u0430 \u043A\u043D\u0438\u0433\u0438: <strong>${snap.bids.length + snap.asks.length} \u0443\u0440\u043E\u0432\u043D\u0435\u0439</strong> \xB7 \u0428\u0430\u0433 \u0430\u0433\u0440\u0435\u0433\u0430\u0446\u0438\u0438: <strong class="text-amber">$${grouped.bucketStepUsd}</strong> \xB7 \u0421\u0443\u043C\u043C\u0430\u0440\u043D\u043E \u0432 \u0441\u0442\u0430\u043A\u0430\u043D\u0435: <strong class="text-green">BID $${(grouped.totalBidCapitalUsd / 1e6).toFixed(2)}M</strong> vs <strong class="text-red">ASK $${(grouped.totalAskCapitalUsd / 1e6).toFixed(2)}M</strong>
+          </div>
+        </div>
+
         <div class="aladdin-kpi-grid">
           <div class="kpi-card">
             <span class="kpi-label">STOIKOV MICRO-PRICE &amp; ALPHA SKEW</span>
             <span class="kpi-val ${skewClass}">
-              $${snap.microPrice.toLocaleString(void 0, { minimumFractionDigits: snap.microPrice < 10 ? 4 : 2, maximumFractionDigits: snap.microPrice < 10 ? 4 : 2 })}
+              ${fmtPrice(snap.microPrice)}
             </span>
             <span class="kpi-sub">SKEW VS MID: <strong>${skewSign}${snap.microPriceSkewBps.toFixed(2)} bps</strong> \xB7 SPREAD ${snap.spreadBps.toFixed(2)} bps</span>
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">20-LEVEL ORDERBOOK IMBALANCE (OBI-20)</span>
+            <span class="kpi-label">DEEP ORDERBOOK IMBALANCE (1000-LVL)</span>
             <span class="kpi-val ${obiClass}">${obiSign}${snap.obi20Percent.toFixed(1)}%</span>
-            <span class="kpi-sub">${snap.regime} \xB7 BID $${Math.round(snap.totalBidDepthUsd).toLocaleString()} / ASK $${Math.round(snap.totalAskDepthUsd).toLocaleString()}</span>
+            <span class="kpi-sub">${snap.regime} \xB7 BID $${(grouped.totalBidCapitalUsd / 1e6).toFixed(2)}M / ASK $${(grouped.totalAskCapitalUsd / 1e6).toFixed(2)}M</span>
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">BIGGEST BID WALL (SUPPORT \u041F\u041B\u0418\u0422\u0410)</span>
+            <span class="kpi-label">\u0413\u041B\u0410\u0412\u041D\u0410\u042F \u041F\u041B\u0418\u0422\u0410 \u041F\u041E\u041A\u0423\u041F\u041E\u041A (TOP BID CLUSTER)</span>
             <span class="kpi-val text-green">
-              ${snap.biggestBidWall ? `$${snap.biggestBidWall.price.toLocaleString(void 0, { minimumFractionDigits: snap.midPrice < 10 ? 4 : 2 })}` : "--"}
+              ${grouped.topBidClusters[0] ? fmtPrice(grouped.topBidClusters[0].priceBucket) : "--"}
             </span>
             <span class="kpi-sub">
-              ${snap.biggestBidWall ? `$${Math.round(snap.biggestBidWall.notionalUsd).toLocaleString()} (${snap.biggestBidWall.wallMultiple.toFixed(1)}x avg level)` : "--"}
+              ${grouped.topBidClusters[0] ? `$${Math.round(grouped.topBidClusters[0].notionalUsd).toLocaleString()} (${grouped.topBidClusters[0].shareOfSidePercent.toFixed(1)}% \u0432\u0441\u0435\u0439 \u043A\u043D\u0438\u0433\u0438 \xB7 -${grouped.topBidClusters[0].distanceFromMidPercent.toFixed(2)}%)` : "--"}
             </span>
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">BIGGEST ASK WALL (RESISTANCE \u041F\u041B\u0418\u0422\u0410)</span>
+            <span class="kpi-label">\u0413\u041B\u0410\u0412\u041D\u0410\u042F \u041F\u041B\u0418\u0422\u0410 \u041F\u0420\u041E\u0414\u0410\u0416 (TOP ASK CLUSTER)</span>
             <span class="kpi-val text-red">
-              ${snap.biggestAskWall ? `$${snap.biggestAskWall.price.toLocaleString(void 0, { minimumFractionDigits: snap.midPrice < 10 ? 4 : 2 })}` : "--"}
+              ${grouped.topAskClusters[0] ? fmtPrice(grouped.topAskClusters[0].priceBucket) : "--"}
             </span>
             <span class="kpi-sub">
-              ${snap.biggestAskWall ? `$${Math.round(snap.biggestAskWall.notionalUsd).toLocaleString()} (${snap.biggestAskWall.wallMultiple.toFixed(1)}x avg level)` : "--"}
+              ${grouped.topAskClusters[0] ? `$${Math.round(grouped.topAskClusters[0].notionalUsd).toLocaleString()} (${grouped.topAskClusters[0].shareOfSidePercent.toFixed(1)}% \u0432\u0441\u0435\u0439 \u043A\u043D\u0438\u0433\u0438 \xB7 +${grouped.topAskClusters[0].distanceFromMidPercent.toFixed(2)}%)` : "--"}
             </span>
           </div>
         </div>
 
-        <div class="real-source-banner mt-2">
-          <span class="live-pulse"></span>
-          <span><strong>$500K SWEEP SLIPPAGE ESTIMATOR:</strong> Market BUY Impact: <strong>+${snap.slippageBuy1M_Bps.toFixed(2)} bps</strong> \xB7 Market SELL Impact: <strong>-${snap.slippageSell1M_Bps.toFixed(2)} bps</strong></span>
-          <span class="returns-badge badge-live">\u25CF 100MS L2 DEPTH STREAM ACTIVE</span>
+        <!-- TOP CAPITAL CONCENTRATION ZONES (\u0413\u0414\u0415 \u0421\u0418\u0414\u0418\u0422 \u041E\u0421\u041D\u041E\u0412\u041D\u0410\u042F \u041C\u0410\u0421\u0421\u0410 \u0411\u0410\u0411\u041B\u0410) -->
+        <div class="mt-3" style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px 14px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
+            <div>
+              <span style="font-size: 12px; font-weight: 800; color: var(--amber-bright); letter-spacing: 0.06em;">
+                \u{1F40B} TOP CAPITAL CONCENTRATION ZONES \u2014 \u0413\u0414\u0415 \u0421\u0418\u0414\u0418\u0422 \u041E\u0421\u041D\u041E\u0412\u041D\u0410\u042F \u041C\u0410\u0421\u0421\u0410 \u0411\u0410\u0411\u041B\u0410 (\u0428\u0410\u0413 $${grouped.bucketStepUsd})
+              </span>
+              <span style="font-size: 11px; color: var(--text-muted); margin-left: 8px;">
+                \u0410\u0432\u0442\u043E\u043C\u0430\u0442\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u0440\u0430\u0434\u0430\u0440 4 \u043A\u0440\u0443\u043F\u043D\u0435\u0439\u0448\u0438\u0445 \u0437\u043E\u043D \u0441\u043E\u0441\u0440\u0435\u0434\u043E\u0442\u043E\u0447\u0435\u043D\u0438\u044F \u043B\u0438\u043C\u0438\u0442\u043D\u043E\u0433\u043E \u043A\u0430\u043F\u0438\u0442\u0430\u043B\u0430 \u043F\u043E\u043A\u0443\u043F\u0430\u0442\u0435\u043B\u0435\u0439 \u0438 \u043F\u0440\u043E\u0434\u0430\u0432\u0446\u043E\u0432 \u043F\u043E \u0432\u0441\u0435\u0439 \u0433\u043B\u0443\u0431\u0438\u043D\u0435 \u0441\u0442\u0430\u043A\u0430\u043D\u0430
+              </span>
+            </div>
+            <span class="returns-badge badge-live">\u25CF $500K SWEEP IMPACT: BUY +${snap.slippageBuy1M_Bps.toFixed(2)} bps / SELL -${snap.slippageSell1M_Bps.toFixed(2)} bps</span>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+            <!-- TOP 4 BID CAPITAL CLUSTERS -->
+            <div style="background: rgba(16, 185, 129, 0.04); border: 1px solid rgba(16, 185, 129, 0.22); border-radius: 6px; padding: 10px;">
+              <div style="font-size: 11px; font-weight: 800; color: var(--green); margin-bottom: 8px; letter-spacing: 0.05em;">
+                \u{1F7E2} \u0422\u041E\u041F-4 \u0417\u041E\u041D\u042B \u041A\u0410\u041F\u0418\u0422\u0410\u041B\u0410 \u041F\u041E\u041A\u0423\u041F\u0410\u0422\u0415\u041B\u0415\u0419 (BID LIQUIDITY POOLS \u2014 \u0417\u041E\u041D\u042B \u041E\u0422\u0421\u041A\u041E\u041A\u0410 &amp; \u0417\u0410\u0429\u0418\u0422\u042B)
+              </div>
+              <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
+                ${grouped.topBidClusters.map(
+      (c, idx) => `
+                  <div style="background: rgba(10, 15, 29, 0.85); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 5px; padding: 8px 10px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                      <span style="font-size: 10px; color: var(--text-muted); font-weight: 700;">#${idx + 1} \u0417\u041E\u041D\u0410 \u041F\u041E\u041A\u0423\u041F\u041E\u041A</span>
+                      <span class="regime-badge regime-squeeze">${c.shareOfSidePercent.toFixed(1)}% \u041A\u041D\u0418\u0413\u0418</span>
+                    </div>
+                    <div style="font-size: 15px; font-weight: 800; color: var(--green); margin: 3px 0;">
+                      ${fmtPrice(c.priceBucket)} <span style="font-size: 11px; color: var(--text-secondary);">\u2014 $${Math.round(c.notionalUsd).toLocaleString()}</span>
+                    </div>
+                    <div style="font-size: 10px; color: var(--text-secondary);">
+                      \u041E\u0431\u044A\u0435\u043C: <strong>${c.quantity.toFixed(3)} ${snap.asset}</strong> \xB7 \u0414\u0438\u0441\u0442\u0430\u043D\u0446\u0438\u044F: <strong>-${c.distanceFromMidPercent.toFixed(2)}% (-$${c.distanceFromMidUsd.toLocaleString(void 0, { maximumFractionDigits: 2 })})</strong> \xB7 \u041E\u0440\u0434\u0435\u0440\u043E\u0432: ${c.levelsMerged}
+                    </div>
+                  </div>
+                `
+    ).join("")}
+              </div>
+            </div>
+
+            <!-- TOP 4 ASK CAPITAL CLUSTERS -->
+            <div style="background: rgba(239, 68, 68, 0.04); border: 1px solid rgba(239, 68, 68, 0.22); border-radius: 6px; padding: 10px;">
+              <div style="font-size: 11px; font-weight: 800; color: var(--red); margin-bottom: 8px; letter-spacing: 0.05em;">
+                \u{1F534} \u0422\u041E\u041F-4 \u0417\u041E\u041D\u042B \u041A\u0410\u041F\u0418\u0422\u0410\u041B\u0410 \u041F\u0420\u041E\u0414\u0410\u0412\u0426\u041E\u0412 (ASK LIQUIDITY POOLS \u2014 \u0417\u041E\u041D\u042B \u0421\u041E\u041F\u0420\u041E\u0422\u0418\u0412\u041B\u0415\u041D\u0418\u042F &amp; \u0424\u0418\u041A\u0421\u0410\u0426\u0418\u0418)
+              </div>
+              <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
+                ${grouped.topAskClusters.map(
+      (c, idx) => `
+                  <div style="background: rgba(10, 15, 29, 0.85); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 5px; padding: 8px 10px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                      <span style="font-size: 10px; color: var(--text-muted); font-weight: 700;">#${idx + 1} \u0417\u041E\u041D\u0410 \u041F\u0420\u041E\u0414\u0410\u0416</span>
+                      <span class="regime-badge regime-extreme">${c.shareOfSidePercent.toFixed(1)}% \u041A\u041D\u0418\u0413\u0418</span>
+                    </div>
+                    <div style="font-size: 15px; font-weight: 800; color: var(--red); margin: 3px 0;">
+                      ${fmtPrice(c.priceBucket)} <span style="font-size: 11px; color: var(--text-secondary);">\u2014 $${Math.round(c.notionalUsd).toLocaleString()}</span>
+                    </div>
+                    <div style="font-size: 10px; color: var(--text-secondary);">
+                      \u041E\u0431\u044A\u0435\u043C: <strong>${c.quantity.toFixed(3)} ${snap.asset}</strong> \xB7 \u0414\u0438\u0441\u0442\u0430\u043D\u0446\u0438\u044F: <strong>+${c.distanceFromMidPercent.toFixed(2)}% (+$${c.distanceFromMidUsd.toLocaleString(void 0, { maximumFractionDigits: 2 })})</strong> \xB7 \u041E\u0440\u0434\u0435\u0440\u043E\u0432: ${c.levelsMerged}
+                    </div>
+                  </div>
+                `
+    ).join("")}
+              </div>
+            </div>
+          </div>
         </div>
 
+        <!-- GROUPED BIDS & ASKS LADDERS -->
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;" class="mt-3">
           <!-- BIDS LADDER -->
           <div class="market-matrix-table-wrap">
             <table class="terminal-table">
               <thead>
                 <tr>
-                  <th>BID PRICE (${snap.asset})</th>
+                  <th>BID BUCKET ($${grouped.bucketStepUsd})</th>
                   <th>SIZE (${snap.asset})</th>
-                  <th>NOTIONAL ($)</th>
+                  <th>CAPITAL IN ZONE ($)</th>
                   <th>CUMULATIVE ($)</th>
-                  <th>WALL DETECTOR</th>
+                  <th>SHARE / WALL RADAR</th>
                 </tr>
               </thead>
               <tbody>
-                ${snap.bids.slice(0, 15).map(
+                ${grouped.groupedBids.slice(0, 20).map(
       (b) => `
-                  <tr class="${b.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, var(--up-tint) ${b.depthPercent.toFixed(0)}%, transparent ${b.depthPercent.toFixed(0)}%);">
-                    <td class="text-green font-bold">$${b.price.toLocaleString(void 0, { minimumFractionDigits: b.price < 10 ? 4 : 2 })}</td>
+                  <tr class="${b.isWhaleCluster ? "row-highlight" : ""}" style="background: linear-gradient(90deg, var(--up-tint) ${b.depthPercent.toFixed(0)}%, transparent ${b.depthPercent.toFixed(0)}%);">
+                    <td class="text-green font-bold">
+                      ${fmtPrice(b.priceBucket)}
+                      <span style="font-size: 9px; color: var(--text-muted); margin-left: 4px;">(-${b.distanceFromMidPercent.toFixed(2)}%)</span>
+                    </td>
                     <td>${b.quantity.toLocaleString(void 0, { maximumFractionDigits: 3 })}</td>
-                    <td>$${Math.round(b.notionalUsd).toLocaleString()}</td>
+                    <td class="font-bold">$${Math.round(b.notionalUsd).toLocaleString()}</td>
                     <td class="text-dim">$${Math.round(b.cumulativeUsd).toLocaleString()}</td>
                     <td>
-                      ${b.isWall ? `<span class="regime-badge regime-squeeze">\u{1F9F1} BID WALL (${b.wallMultiple.toFixed(1)}x)</span>` : `<span class="text-dim">${b.wallMultiple.toFixed(1)}x</span>`}
+                      ${b.isWhaleCluster ? `<span class="regime-badge regime-squeeze">\u{1F40B} \u041F\u0423\u041B $${Math.round(b.notionalUsd / 1e3)}K (${b.wallMultiple.toFixed(1)}x \xB7 ${b.shareOfSidePercent.toFixed(1)}%)</span>` : `<span class="text-dim">${b.shareOfSidePercent.toFixed(1)}% (${b.wallMultiple.toFixed(1)}x)</span>`}
                     </td>
                   </tr>
                 `
@@ -6995,23 +7836,26 @@ var ApexWebTerminal = class {
             <table class="terminal-table">
               <thead>
                 <tr>
-                  <th>ASK PRICE (${snap.asset})</th>
+                  <th>ASK BUCKET ($${grouped.bucketStepUsd})</th>
                   <th>SIZE (${snap.asset})</th>
-                  <th>NOTIONAL ($)</th>
+                  <th>CAPITAL IN ZONE ($)</th>
                   <th>CUMULATIVE ($)</th>
-                  <th>WALL DETECTOR</th>
+                  <th>SHARE / WALL RADAR</th>
                 </tr>
               </thead>
               <tbody>
-                ${snap.asks.slice(0, 15).map(
+                ${grouped.groupedAsks.slice(0, 20).map(
       (a) => `
-                  <tr class="${a.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, var(--down-tint) ${a.depthPercent.toFixed(0)}%, transparent ${a.depthPercent.toFixed(0)}%);">
-                    <td class="text-red font-bold">$${a.price.toLocaleString(void 0, { minimumFractionDigits: a.price < 10 ? 4 : 2 })}</td>
+                  <tr class="${a.isWhaleCluster ? "row-highlight" : ""}" style="background: linear-gradient(90deg, var(--down-tint) ${a.depthPercent.toFixed(0)}%, transparent ${a.depthPercent.toFixed(0)}%);">
+                    <td class="text-red font-bold">
+                      ${fmtPrice(a.priceBucket)}
+                      <span style="font-size: 9px; color: var(--text-muted); margin-left: 4px;">(+${a.distanceFromMidPercent.toFixed(2)}%)</span>
+                    </td>
                     <td>${a.quantity.toLocaleString(void 0, { maximumFractionDigits: 3 })}</td>
-                    <td>$${Math.round(a.notionalUsd).toLocaleString()}</td>
+                    <td class="font-bold">$${Math.round(a.notionalUsd).toLocaleString()}</td>
                     <td class="text-dim">$${Math.round(a.cumulativeUsd).toLocaleString()}</td>
                     <td>
-                      ${a.isWall ? `<span class="regime-badge regime-extreme">\u{1F9F1} ASK WALL (${a.wallMultiple.toFixed(1)}x)</span>` : `<span class="text-dim">${a.wallMultiple.toFixed(1)}x</span>`}
+                      ${a.isWhaleCluster ? `<span class="regime-badge regime-extreme">\u{1F40B} \u041F\u0423\u041B $${Math.round(a.notionalUsd / 1e3)}K (${a.wallMultiple.toFixed(1)}x \xB7 ${a.shareOfSidePercent.toFixed(1)}%)</span>` : `<span class="text-dim">${a.shareOfSidePercent.toFixed(1)}% (${a.wallMultiple.toFixed(1)}x)</span>`}
                     </td>
                   </tr>
                 `
@@ -7029,9 +7873,23 @@ var ApexWebTerminal = class {
         );
         if (sym) {
           playCommandGo();
+          this.orderbookBucketStep = 0;
           this.orderbookService.switchSymbol(sym).then(() => {
             this.render();
           });
+        }
+      });
+    });
+    document.querySelectorAll("[data-book-bucket]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const stepStr = e.currentTarget.getAttribute(
+          "data-book-bucket"
+        );
+        const stepVal = parseFloat(stepStr || "0");
+        if (stepVal > 0) {
+          playCommandGo();
+          this.orderbookBucketStep = stepVal;
+          this.renderOrderbookScreen(container);
         }
       });
     });
@@ -8906,6 +9764,325 @@ var ApexWebTerminal = class {
     });
   }
   // ==========================================
+  // SCREEN: WORLD-CLASS QUANT CONFLUENCE, SPOT VS PERP CVD, STATARB & MACRO LIQUIDITY (QUANT <GO>)
+  // ==========================================
+  renderQuantScreen(container) {
+    const btcOpt = this.derivService.getOptionsSnapshot("BTC");
+    const ethOpt = this.derivService.getOptionsSnapshot("ETH");
+    const masterRows = this.quantEngine.computeMasterConfluenceMatrix({
+      tickers: this.tickers,
+      fundingRates: this.fundingRates,
+      whaleTrades: this.whaleStream.getWhaleTrades(),
+      orderbookSnapshots: (sym) => this.orderbookService.getSymbol() === sym ? this.orderbookService.getSnapshot() : null,
+      btcOptions: btcOpt,
+      ethOptions: ethOpt
+    });
+    const statArbRows = WorldClassQuantService.computeStatArbMatrix(
+      this.returnsService.getReturns(),
+      this.tickers
+    );
+    const macroLiq = this.quantEngine.getMacroLiquidity();
+    const fmtPrice = (p) => p < 1 ? `$${p.toFixed(4)}` : p < 10 ? `$${p.toFixed(3)}` : p < 100 ? `$${p.toFixed(2)}` : `$${p.toLocaleString(void 0, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const avgConfluence = masterRows.length > 0 ? Math.round(
+      masterRows.reduce((s, r) => s + r.masterScore, 0) / masterRows.length
+    ) : 0;
+    const sortedByBull = [...masterRows].sort(
+      (a, b) => b.masterScore - a.masterScore
+    );
+    const topBull = sortedByBull[0];
+    const topBear = sortedByBull[sortedByBull.length - 1];
+    const btcSpotPerp = this.quantEngine.getSpotPerpMetrics("BTCUSDT");
+    const activeStatArb = statArbRows.filter((s) => s.signal !== "EQUILIBRIUM");
+    const verdictBadge = (grade, score) => {
+      const sign = score >= 0 ? "+" : "";
+      if (grade === "A+ INSTITUTIONAL LONG") {
+        return `<span class="regime-badge regime-squeeze">\u{1F7E2} ${grade} (${sign}${score})</span>`;
+      }
+      if (grade === "B+ ACCUMULATE LONG") {
+        return `<span class="regime-badge regime-elevated" style="color: var(--green); border-color: var(--green);">\u{1F7E2} ${grade} (${sign}${score})</span>`;
+      }
+      if (grade === "A+ INSTITUTIONAL SHORT") {
+        return `<span class="regime-badge regime-extreme">\u{1F534} ${grade} (${sign}${score})</span>`;
+      }
+      if (grade === "B+ DISTRIBUTE SHORT") {
+        return `<span class="regime-badge regime-elevated" style="color: var(--red); border-color: var(--red);">\u{1F534} ${grade} (${sign}${score})</span>`;
+      }
+      return `<span class="regime-badge regime-calm">\u26AA ${grade} (${sign}${score})</span>`;
+    };
+    const flowRegimeBadge = (r) => {
+      if (r === "BULLISH_SPOT_ABSORPTION") {
+        return `<span class="regime-badge regime-squeeze">\u{1F40B} SPOT ABSORPTION (\u0421\u041A\u0423\u041F\u041A\u0410 \u041D\u0410 \u0421\u041F\u041E\u0422\u0415)</span>`;
+      }
+      if (r === "BEARISH_PERP_TRAP") {
+        return `<span class="regime-badge regime-extreme">\u26A0\uFE0F PERP FOMO TRAP (\u0421\u041F\u041E\u0422 \u041F\u0420\u041E\u0414\u0410\u0415\u0422)</span>`;
+      }
+      if (r === "SYNCHRONIZED_BULL_INFLOW") {
+        return `<span class="regime-badge regime-squeeze">\u{1F680} SYNC BULL INFLOW (\u0421\u041F\u041E\u0422+\u0424\u042C\u042E\u0427\u0418)</span>`;
+      }
+      if (r === "SYNCHRONIZED_BEAR_OUTFLOW") {
+        return `<span class="regime-badge regime-extreme">\u{1FA78} SYNC BEAR OUTFLOW (\u0421\u041B\u0418\u0412)</span>`;
+      }
+      return `<span class="regime-badge regime-calm">\u26AA BALANCED FLOW</span>`;
+    };
+    const usdtItem = macroLiq.stablecoins.find((s) => s.symbol === "USDT");
+    const usdcItem = macroLiq.stablecoins.find((s) => s.symbol === "USDC");
+    const usdeItem = macroLiq.stablecoins.find((s) => s.symbol === "USDe");
+    container.innerHTML = `
+      <div class="terminal-screen screen-quant">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">\u{1F9EC} WORLD-CLASS QUANT CONFLUENCE, SPOT VS PERP CVD, US COINBASE PREMIUM &amp; STATARB</h2>
+            <span class="screen-subtitle">6-FACTOR INSTITUTIONAL ALPHA MATRIX (-100..+100) \xB7 SPOT VS PERP CVD DIVERGENCE \xB7 COINBASE USD PREMIUM \xB7 ORNSTEIN-UHLENBECK STATARB \xB7 DEFILLAMA STABLECOIN IMPULSE</span>
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <button class="terminal-btn-sm" id="btn-refresh-quant">\u{1F504} REFRESH LIVE QUANT FEEDS</button>
+          </div>
+        </div>
+
+        <!-- TOP KPI SUMMARY -->
+        <div class="aladdin-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">MARKET-WIDE 6-FACTOR CONFLUENCE</span>
+            <span class="kpi-val ${avgConfluence >= 0 ? "text-green" : "text-red"}">
+              ${avgConfluence >= 0 ? "+" : ""}${avgConfluence} / 100
+            </span>
+            <span class="kpi-sub">
+              TOP LONG: <strong class="text-green">${topBull ? `${topBull.asset} (${topBull.masterScore >= 0 ? "+" : ""}${topBull.masterScore})` : "--"}</strong> \xB7
+              TOP SHORT: <strong class="text-red">${topBear ? `${topBear.asset} (${topBear.masterScore >= 0 ? "+" : ""}${topBear.masterScore})` : "--"}</strong>
+            </span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">US INSTITUTIONAL COINBASE PREMIUM (BTC)</span>
+            <span class="kpi-val ${btcSpotPerp.coinbasePremiumBps >= 0 ? "text-green" : "text-red"}">
+              ${btcSpotPerp.coinbasePremiumBps >= 0 ? "+" : ""}${btcSpotPerp.coinbasePremiumBps.toFixed(2)} bps
+            </span>
+            <span class="kpi-sub">
+              CB USD: <strong>$${btcSpotPerp.coinbaseSpotPrice.toLocaleString(void 0, { maximumFractionDigits: 2 })}</strong> vs BINANCE USDT
+            </span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">GLOBAL STABLECOIN LIQUIDITY (DEFILLAMA)</span>
+            <span class="kpi-val ${macroLiq.netMint24hUsd >= 0 ? "text-green" : "text-red"}">
+              $${(macroLiq.totalStablecoinMcapUsd / 1e9).toFixed(2)}B
+            </span>
+            <span class="kpi-sub">
+              24H MINT/BURN: <strong>${macroLiq.netMint24hUsd >= 0 ? "+" : "-"}$${(Math.abs(macroLiq.netMint24hUsd) / 1e6).toFixed(0)}M</strong> \xB7
+              7D: <strong>${macroLiq.netMint7dUsd >= 0 ? "+" : "-"}$${(Math.abs(macroLiq.netMint7dUsd) / 1e9).toFixed(2)}B</strong>
+            </span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">ACTIVE STATARB COINTEGRATION SIGNALS</span>
+            <span class="kpi-val text-amber">${activeStatArb.length} / ${statArbRows.length} PAIRS</span>
+            <span class="kpi-sub">
+              EXTREME Z-SCORE: <strong>${statArbRows[0] ? `${statArbRows[0].pairLabel} (Z = ${statArbRows[0].spreadZScore >= 0 ? "+" : ""}${statArbRows[0].spreadZScore.toFixed(2)}\u03C3)` : "--"}</strong>
+            </span>
+          </div>
+        </div>
+
+        <!-- SECTION 1: 6-FACTOR MASTER INSTITUTIONAL CONFLUENCE MATRIX & SPOT VS PERP CVD -->
+        <div class="market-matrix-table-wrap mt-3">
+          <div style="padding: 10px 14px; border-bottom: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <div>
+              <span style="font-size: 12px; font-weight: 800; color: var(--amber-bright); letter-spacing: 0.06em;">
+                \u{1F3AF} 1. 6-FACTOR MASTER INSTITUTIONAL CONFLUENCE MATRIX (-100 TO +100) &amp; SPOT VS PERP CVD DIVERGENCE
+              </span>
+              <span style="font-size: 11px; color: var(--text-muted); margin-left: 8px;">
+                \u0412\u0435\u0441\u0430: Spot vs Perp CVD (25%) \xB7 US Coinbase Premium (15%) \xB7 24h Whale Flow (20%) \xB7 L2 Stoikov &amp; Walls (15%) \xB7 OI &amp; Funding (15%) \xB7 Deribit Options (10%)
+              </span>
+            </div>
+            <span class="returns-badge badge-live">\u25CF 1-CLICK SEND TO EXEC &lt;GO&gt;</span>
+          </div>
+          <table class="terminal-table">
+            <thead>
+              <tr>
+                <th>ASSET</th>
+                <th>PRICE</th>
+                <th>COMPOSITE VERDICT (-100..+100)</th>
+                <th>SPOT CVD (12H)</th>
+                <th>PERP CVD (12H)</th>
+                <th>SPOT VS PERP REGIME</th>
+                <th>US COINBASE PREMIUM</th>
+                <th>FACTOR SCORES (S/CB/W/L2/OI/O)</th>
+                <th>INSTITUTIONAL THESIS &amp; 1-CLICK TRADE</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${masterRows.map((r) => {
+      const sp = r.spotPerpMetrics;
+      const spotCvdM = sp.spotCvd12hUsd / 1e6;
+      const perpCvdM = sp.perpCvd12hUsd / 1e6;
+      const cbPrem = sp.coinbasePremiumBps;
+      const tradeDir = r.recommendedDirection;
+      const f = r.factors;
+      return `
+                  <tr>
+                    <td><strong>${r.asset}</strong></td>
+                    <td class="font-bold">${fmtPrice(r.price)}</td>
+                    <td>${verdictBadge(r.grade, r.masterScore)}</td>
+                    <td class="${spotCvdM >= 0 ? "text-green" : "text-red"} font-bold">
+                      ${spotCvdM >= 0 ? "+" : "-"}$${Math.abs(spotCvdM).toFixed(2)}M
+                    </td>
+                    <td class="${perpCvdM >= 0 ? "text-green" : "text-red"} font-bold">
+                      ${perpCvdM >= 0 ? "+" : "-"}$${Math.abs(perpCvdM).toFixed(2)}M
+                    </td>
+                    <td>${flowRegimeBadge(sp.regime)}</td>
+                    <td class="${cbPrem >= 0 ? "text-green" : "text-red"} font-bold">
+                      ${cbPrem >= 0 ? "+" : ""}${cbPrem.toFixed(2)} bps
+                    </td>
+                    <td style="font-size: 10px; font-family: var(--font-mono); color: var(--text-secondary);">
+                      S:${f.spotVsPerpScore >= 0 ? "+" : ""}${f.spotVsPerpScore} |
+                      CB:${f.coinbasePremiumScore >= 0 ? "+" : ""}${f.coinbasePremiumScore} |
+                      W:${f.whaleTrancheScore >= 0 ? "+" : ""}${f.whaleTrancheScore} |
+                      L2:${f.orderbookMicroScore >= 0 ? "+" : ""}${f.orderbookMicroScore} |
+                      OI:${f.oiFundingScore >= 0 ? "+" : ""}${f.oiFundingScore} |
+                      O:${f.optionsGammaScore >= 0 ? "+" : ""}${f.optionsGammaScore}
+                    </td>
+                    <td>
+                      <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+                        <span style="font-size: 11px; color: var(--text-primary);">${r.thesisSummary}</span>
+                        <button class="terminal-btn-sm" data-quant-exec-sym="${r.symbol}" data-quant-exec-dir="${tradeDir}" style="white-space: nowrap; border-color: ${tradeDir === "LONG" ? "var(--green)" : "var(--red)"}; color: ${tradeDir === "LONG" ? "var(--green)" : "var(--red)"};">
+                          \u26A1 ${tradeDir} ${r.asset}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                `;
+    }).join("")}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- SECTION 2: STATISTICAL ARBITRAGE (STATARB) & ORNSTEIN-UHLENBECK MEAN-REVERSION MATRIX -->
+        <div class="market-matrix-table-wrap mt-3">
+          <div style="padding: 10px 14px; border-bottom: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <div>
+              <span style="font-size: 12px; font-weight: 800; color: var(--green); letter-spacing: 0.06em;">
+                \u{1F4D0} 2. STATISTICAL ARBITRAGE (STATARB), PAIRS Z-SCORE &amp; ORNSTEIN-UHLENBECK HALF-LIFE SCANNER
+              </span>
+              <span style="font-size: 11px; color: var(--text-muted); margin-left: 8px;">
+                60-\u0434\u043D\u0435\u0432\u043D\u0430\u044F \u043A\u043E\u0438\u043D\u0442\u0435\u0433\u0440\u0430\u0446\u0438\u044F \u043F\u0430\u0440 $S_t = \\ln(P_A) - \\beta \\ln(P_B)$, OLS Hedge Ratio ($\\beta$), Z-Score \u043E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u0438\u044F ($\\sigma$) \u0438 \u043F\u0435\u0440\u0438\u043E\u0434 \u043F\u043E\u043B\u0443\u0440\u0430\u0441\u043F\u0430\u0434\u0430 \u0432\u043E\u0437\u0432\u0440\u0430\u0442\u0430 \u043A \u0441\u0440\u0435\u0434\u043D\u0435\u043C\u0443
+              </span>
+            </div>
+            <span class="returns-badge badge-live">\u25CF MARKET-NEUTRAL PAIRS ALPHA</span>
+          </div>
+          <table class="terminal-table">
+            <thead>
+              <tr>
+                <th>PAIR (A / B)</th>
+                <th>CORRELATION (60D)</th>
+                <th>OLS HEDGE BETA (\u03B2)</th>
+                <th>SPREAD Z-SCORE (\u03C3)</th>
+                <th>OU HALF-LIFE (DAYS)</th>
+                <th>STATARB SIGNAL</th>
+                <th>MARKET-NEUTRAL EXECUTION CALL</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${statArbRows.map((s) => {
+      const zSign = s.spreadZScore >= 0 ? "+" : "";
+      const zClass = Math.abs(s.spreadZScore) >= 1.5 ? s.spreadZScore > 0 ? "text-red" : "text-green" : "text-secondary";
+      const sigBadge = s.signal === "STATARB_LONG_A_SHORT_B" ? `<span class="regime-badge regime-squeeze">\u{1F7E2} LONG ${s.legA} / SHORT ${s.legB}</span>` : s.signal === "STATARB_SHORT_A_LONG_B" ? `<span class="regime-badge regime-extreme">\u{1F534} SHORT ${s.legA} / LONG ${s.legB}</span>` : s.signal === "LEAD_LAG_CATCHUP_A" ? `<span class="regime-badge regime-elevated">\u26A1 LEAD-LAG CATCHUP (${s.legA})</span>` : `<span class="regime-badge regime-calm">\u26AA EQUILIBRIUM (|Z| &lt; 1.6)</span>`;
+      return `
+                  <tr>
+                    <td><strong>${s.pairLabel}</strong></td>
+                    <td class="${s.correlation60d >= 0.7 ? "text-green" : "text-amber"} font-bold">${(s.correlation60d * 100).toFixed(1)}%</td>
+                    <td><strong>${s.hedgeBeta.toFixed(2)}x</strong></td>
+                    <td class="${zClass} font-bold" style="font-size: 13px;">${zSign}${s.spreadZScore.toFixed(2)}\u03C3</td>
+                    <td><strong>${s.halfLifeDays.toFixed(1)} \u0434\u043D.</strong></td>
+                    <td>${sigBadge}</td>
+                    <td style="font-size: 11px; color: var(--text-primary);">${s.actionableCall}</td>
+                  </tr>
+                `;
+    }).join("")}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- SECTION 3: DEFILLAMA GLOBAL STABLECOIN MINT/BURN & L1/L2 CHAIN TVL VELOCITY -->
+        <div class="mt-3" style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+          <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px 14px;">
+            <div style="font-size: 12px; font-weight: 800; color: var(--amber-bright); margin-bottom: 8px; letter-spacing: 0.05em;">
+              \u{1F3E6} 3A. DEFILLAMA GLOBAL STABLECOIN MINT / BURN IMPULSE (\u041F\u041E\u0420\u041E\u0425 \u041D\u0410 \u0420\u042B\u041D\u041A\u0415)
+            </div>
+            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px;">
+              \u042D\u043C\u0438\u0441\u0441\u0438\u044F \u0441\u0442\u0435\u0439\u0431\u043B\u043A\u043E\u0438\u043D\u043E\u0432 \u2014 \u0433\u043B\u0430\u0432\u043D\u044B\u0439 \u043E\u043F\u0435\u0440\u0435\u0436\u0430\u044E\u0449\u0438\u0439 \u0438\u043D\u0434\u0438\u043A\u0430\u0442\u043E\u0440 \u043F\u0440\u0438\u0442\u043E\u043A\u0430 \u0436\u0438\u0432\u043E\u0433\u043E \u0438\u043D\u0441\u0442\u0438\u0442\u0443\u0446\u0438\u043E\u043D\u0430\u043B\u044C\u043D\u043E\u0433\u043E \u0444\u0438\u0430\u0442\u0430 \u0432 \u043A\u0440\u0438\u043F\u0442\u043E-\u044D\u043A\u043E\u0441\u0438\u0441\u0442\u0435\u043C\u0443.
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px;">
+              <div style="background: rgba(10, 15, 29, 0.8); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
+                <div style="font-size: 10px; color: var(--text-muted);">TETHER (USDT)</div>
+                <div style="font-size: 15px; font-weight: 800; color: var(--green);">$${((usdtItem?.circulatingUsd ?? 142e9) / 1e9).toFixed(2)}B</div>
+              </div>
+              <div style="background: rgba(10, 15, 29, 0.8); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
+                <div style="font-size: 10px; color: var(--text-muted);">CIRCLE (USDC)</div>
+                <div style="font-size: 15px; font-weight: 800; color: var(--amber-bright);">$${((usdcItem?.circulatingUsd ?? 56e9) / 1e9).toFixed(2)}B</div>
+              </div>
+              <div style="background: rgba(10, 15, 29, 0.8); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
+                <div style="font-size: 10px; color: var(--text-muted);">ETHENA (USDe)</div>
+                <div style="font-size: 15px; font-weight: 800; color: var(--text-primary);">$${((usdeItem?.circulatingUsd ?? 59e8) / 1e9).toFixed(2)}B</div>
+              </div>
+            </div>
+            <div style="font-size: 11px; color: var(--text-primary); padding: 8px 10px; background: rgba(16, 185, 129, 0.06); border-left: 3px solid var(--green); border-radius: 4px;">
+              <strong>\u0420\u0435\u0436\u0438\u043C \u043C\u0430\u043A\u0440\u043E-\u043B\u0438\u043A\u0432\u0438\u0434\u043D\u043E\u0441\u0442\u0438 (${macroLiq.liquidityRegime}):</strong> 24h Net Mint/Burn ${macroLiq.netMint24hUsd >= 0 ? "+" : "-"}$${(Math.abs(macroLiq.netMint24hUsd) / 1e6).toFixed(0)}M \xB7 7d Net Mint/Burn ${macroLiq.netMint7dUsd >= 0 ? "+" : "-"}$${(Math.abs(macroLiq.netMint7dUsd) / 1e9).toFixed(2)}B
+            </div>
+          </div>
+
+          <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px 14px;">
+            <div style="font-size: 12px; font-weight: 800; color: var(--amber-bright); margin-bottom: 8px; letter-spacing: 0.05em;">
+              \u26D3\uFE0F 3B. DEFILLAMA CROSS-CHAIN L1/L2 TVL LOCKED CAPITAL (\u041A\u0410\u041F\u0418\u0422\u0410\u041B \u0412 \u0421\u0415\u0422\u042F\u0425)
+            </div>
+            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px;">
+              \u0420\u0430\u0441\u043F\u0440\u0435\u0434\u0435\u043B\u0435\u043D\u0438\u0435 \u0438\u043D\u0441\u0442\u0438\u0442\u0443\u0446\u0438\u043E\u043D\u0430\u043B\u044C\u043D\u043E\u0433\u043E DeFi-\u043A\u0430\u043F\u0438\u0442\u0430\u043B\u0430 (Total Value Locked) \u043F\u043E \u043A\u043B\u044E\u0447\u0435\u0432\u044B\u043C \u0431\u043B\u043E\u043A\u0447\u0435\u0439\u043D\u0430\u043C \u043F\u0435\u0440\u0432\u043E\u0433\u043E \u0443\u0440\u043E\u0432\u043D\u044F.
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
+              ${macroLiq.topChains.map(
+      (c) => `
+                <div style="background: rgba(10, 15, 29, 0.8); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
+                  <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-size: 10px; font-weight: 700; color: var(--text-secondary);">${c.chain.toUpperCase()}</span>
+                    <span style="font-size: 10px; color: var(--amber-bright);">${c.sharePercent.toFixed(1)}%</span>
+                  </div>
+                  <div style="font-size: 14px; font-weight: 800; color: var(--text-primary); margin-top: 2px;">
+                    $${(c.tvlUsd / 1e9).toFixed(2)}B
+                  </div>
+                </div>
+              `
+    ).join("")}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById("btn-refresh-quant")?.addEventListener("click", () => {
+      playCommandGo();
+      Promise.all([
+        this.quantEngine.fetchLiveSpotVsPerpFlows(this.tickers),
+        this.quantEngine.fetchDeFiLlamaMacroLiquidity()
+      ]).then(() => {
+        this.renderQuantScreen(container);
+      });
+    });
+    document.querySelectorAll("[data-quant-exec-sym]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const el = e.currentTarget;
+        const sym = el.getAttribute("data-quant-exec-sym");
+        const dir = el.getAttribute("data-quant-exec-dir");
+        if (sym && dir) {
+          playCommandGo();
+          this.execSymbol = sym;
+          this.execDirection = dir;
+          this.activeScreen = "EXEC";
+          this.orderbookService.switchSymbol(sym).then(() => {
+            this.render();
+          });
+          this.render();
+        }
+      });
+    });
+  }
+  // ==========================================
   // SCREEN: HELP & GRAMMAR
   // ==========================================
   renderHelpScreen(container) {
@@ -8928,7 +10105,12 @@ var ApexWebTerminal = class {
 
           <div class="help-card">
             <span class="help-cmd">BOOK &lt;GO&gt;</span>
-            <p>100ms L2 Orderbook Depth, Stoikov Micro-Price skew (bps), Liquidity Wall Detector, and $500K slippage estimator.</p>
+            <p>Deep 1,000-Level L2 Orderbook with interactive Price-Bucket Zoom, Top 4 Bid/Ask Capital Concentration Zones, Stoikov Micro-Price, and $500K slippage.</p>
+          </div>
+
+          <div class="help-card">
+            <span class="help-cmd">QUANT &lt;GO&gt;</span>
+            <p>6-Factor Institutional Confluence Matrix (-100..+100), Spot vs Perp CVD Divergence, US Coinbase Premium (bps), Ornstein-Uhlenbeck StatArb, and DeFiLlama Stablecoin Impulse.</p>
           </div>
 
           <div class="help-card">

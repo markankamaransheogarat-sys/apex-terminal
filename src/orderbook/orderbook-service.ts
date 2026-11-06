@@ -70,6 +70,33 @@ export interface MultiAssetWallSummary {
   regime: L2OrderbookSnapshot["regime"];
 }
 
+export interface CapitalClusterZone {
+  side: "BID" | "ASK";
+  priceBucket: number;
+  quantity: number;
+  notionalUsd: number;
+  cumulativeUsd: number;
+  depthPercent: number;
+  shareOfSidePercent: number; // % of total bid/ask liquidity concentrated at this zone
+  distanceFromMidPercent: number;
+  distanceFromMidUsd: number;
+  wallMultiple: number;
+  isWhaleCluster: boolean;
+  levelsMerged: number;
+}
+
+export interface GroupedOrderbookView {
+  bucketStepUsd: number;
+  availableBuckets: Array<{ label: string; step: number }>;
+  groupedBids: CapitalClusterZone[];
+  groupedAsks: CapitalClusterZone[];
+  topBidClusters: CapitalClusterZone[]; // Top 4 biggest Bid money zones
+  topAskClusters: CapitalClusterZone[]; // Top 4 biggest Ask money zones
+  totalBidCapitalUsd: number;
+  totalAskCapitalUsd: number;
+  bidAskRatio: number;
+}
+
 export class OrderbookService {
   private static readonly RADAR_SYMBOLS = [
     "BTCUSDT",
@@ -84,6 +111,8 @@ export class OrderbookService {
   private symbol: string = "BTCUSDT";
   private ws: WebSocket | null = null;
   private snapshot: L2OrderbookSnapshot | null = null;
+  private deepRawBids: Array<[string | number, string | number]> = [];
+  private deepRawAsks: Array<[string | number, string | number]> = [];
   private multiSnapshots: Map<string, L2OrderbookSnapshot> = new Map();
   private listeners: Array<(snap: L2OrderbookSnapshot) => void> = [];
   private isDestroyed = false;
@@ -148,7 +177,7 @@ export class OrderbookService {
       OrderbookService.RADAR_SYMBOLS.map(async (sym) => {
         try {
           const res = await fetch(
-            `https://api.binance.com/api/v3/depth?symbol=${sym}&limit=20`,
+            `https://api.binance.com/api/v3/depth?symbol=${sym}&limit=500`,
           );
           if (res.ok) {
             const data = await res.json();
@@ -209,11 +238,13 @@ export class OrderbookService {
     if (typeof fetch === "undefined") return this.snapshot;
     try {
       const res = await fetch(
-        `https://api.binance.com/api/v3/depth?symbol=${this.symbol}&limit=20`,
+        `https://api.binance.com/api/v3/depth?symbol=${this.symbol}&limit=1000`,
       );
       if (res.ok) {
         const raw = await res.json();
         if (raw && Array.isArray(raw.bids) && Array.isArray(raw.asks)) {
+          this.deepRawBids = raw.bids;
+          this.deepRawAsks = raw.asks;
           const snap = OrderbookService.computeL2Analytics(
             this.symbol,
             raw.bids,
@@ -227,6 +258,23 @@ export class OrderbookService {
       }
     } catch {}
     return this.snapshot;
+  }
+
+  private mergeTopWithDeep(
+    topLevels: Array<[string | number, string | number]>,
+    deepLevels: Array<[string | number, string | number]>,
+    isBid: boolean,
+  ): Array<[string | number, string | number]> {
+    if (!deepLevels || deepLevels.length <= 20) return topLevels;
+    if (!topLevels || topLevels.length === 0) return deepLevels;
+    const edgePrice = Number(topLevels[topLevels.length - 1]?.[0] || 0);
+    if (edgePrice <= 0) return topLevels;
+
+    const deeperTail = deepLevels.filter(([p]) => {
+      const price = Number(p);
+      return isBid ? price < edgePrice : price > edgePrice;
+    });
+    return [...topLevels, ...deeperTail];
   }
 
   private connectWs(): void {
@@ -243,10 +291,20 @@ export class OrderbookService {
           const bids = raw?.bids || raw?.b;
           const asks = raw?.asks || raw?.a;
           if (Array.isArray(bids) && Array.isArray(asks)) {
+            const mergedBids = this.mergeTopWithDeep(
+              bids,
+              this.deepRawBids,
+              true,
+            );
+            const mergedAsks = this.mergeTopWithDeep(
+              asks,
+              this.deepRawAsks,
+              false,
+            );
             const snap = OrderbookService.computeL2Analytics(
               this.symbol,
-              bids,
-              asks,
+              mergedBids,
+              mergedAsks,
             );
             this.snapshot = snap;
             this.multiSnapshots.set(this.symbol, snap);
@@ -271,8 +329,215 @@ export class OrderbookService {
   }
 
   /**
+   * Returns recommended price-bucket zoom steps tailored to the asset's price scale.
+   */
+  public static getRecommendedBuckets(
+    midPrice: number,
+  ): Array<{ label: string; step: number }> {
+    if (midPrice >= 20000) {
+      return [
+        { label: "FINE ($1)", step: 1 },
+        { label: "MICRO ($10)", step: 10 },
+        { label: "CLUSTER ($25)", step: 25 },
+        { label: "WHALE ($50)", step: 50 },
+        { label: "MACRO ($100)", step: 100 },
+        { label: "DEEP ($250)", step: 250 },
+      ];
+    }
+    if (midPrice >= 1000) {
+      return [
+        { label: "FINE ($0.1)", step: 0.1 },
+        { label: "MICRO ($1)", step: 1 },
+        { label: "CLUSTER ($2.5)", step: 2.5 },
+        { label: "WHALE ($5)", step: 5 },
+        { label: "MACRO ($10)", step: 10 },
+        { label: "DEEP ($25)", step: 25 },
+      ];
+    }
+    if (midPrice >= 50) {
+      return [
+        { label: "FINE ($0.02)", step: 0.02 },
+        { label: "MICRO ($0.10)", step: 0.1 },
+        { label: "CLUSTER ($0.50)", step: 0.5 },
+        { label: "WHALE ($1.0)", step: 1 },
+        { label: "MACRO ($2.5)", step: 2.5 },
+        { label: "DEEP ($5.0)", step: 5 },
+      ];
+    }
+    if (midPrice >= 1) {
+      return [
+        { label: "FINE ($0.001)", step: 0.001 },
+        { label: "MICRO ($0.005)", step: 0.005 },
+        { label: "CLUSTER ($0.01)", step: 0.01 },
+        { label: "WHALE ($0.025)", step: 0.025 },
+        { label: "MACRO ($0.05)", step: 0.05 },
+        { label: "DEEP ($0.10)", step: 0.1 },
+      ];
+    }
+    return [
+      { label: "FINE ($0.0001)", step: 0.0001 },
+      { label: "MICRO ($0.0005)", step: 0.0005 },
+      { label: "CLUSTER ($0.001)", step: 0.001 },
+      { label: "WHALE ($0.0025)", step: 0.0025 },
+      { label: "MACRO ($0.005)", step: 0.005 },
+      { label: "DEEP ($0.01)", step: 0.01 },
+    ];
+  }
+
+  /**
+   * Groups raw orderbook levels into price buckets (Zoom Out) to expose where the largest
+   * institutional money pools ("основная масса бабла") sit in the book.
+   */
+  public static groupOrderbookByBucket(
+    snap: L2OrderbookSnapshot,
+    requestedBucketStepUsd: number = 0,
+  ): GroupedOrderbookView {
+    const availableBuckets = OrderbookService.getRecommendedBuckets(
+      snap.midPrice,
+    );
+    const defaultStep =
+      availableBuckets[2]?.step || availableBuckets[0]?.step || 1;
+    const step =
+      requestedBucketStepUsd > 0 ? requestedBucketStepUsd : defaultStep;
+    const decimals =
+      step < 0.001 ? 5 : step < 0.01 ? 4 : step < 0.1 ? 3 : step < 1 ? 2 : 2;
+
+    const bidMap = new Map<
+      number,
+      { qty: number; notional: number; count: number }
+    >();
+    let totalBidCapitalUsd = 0;
+    for (const b of snap.bids) {
+      const bucketPrice = Number(
+        (Math.floor(b.price / step) * step).toFixed(decimals),
+      );
+      const cur = bidMap.get(bucketPrice) || { qty: 0, notional: 0, count: 0 };
+      cur.qty += b.quantity;
+      cur.notional += b.notionalUsd;
+      cur.count += 1;
+      bidMap.set(bucketPrice, cur);
+      totalBidCapitalUsd += b.notionalUsd;
+    }
+
+    const askMap = new Map<
+      number,
+      { qty: number; notional: number; count: number }
+    >();
+    let totalAskCapitalUsd = 0;
+    for (const a of snap.asks) {
+      const bucketPrice = Number(
+        (Math.ceil(a.price / step) * step).toFixed(decimals),
+      );
+      const cur = askMap.get(bucketPrice) || { qty: 0, notional: 0, count: 0 };
+      cur.qty += a.quantity;
+      cur.notional += a.notionalUsd;
+      cur.count += 1;
+      askMap.set(bucketPrice, cur);
+      totalAskCapitalUsd += a.notionalUsd;
+    }
+
+    const allBucketNotionals = [
+      ...Array.from(bidMap.values()).map((v) => v.notional),
+      ...Array.from(askMap.values()).map((v) => v.notional),
+    ];
+    const meanBucketUsd =
+      allBucketNotionals.length > 0
+        ? allBucketNotionals.reduce((acc, v) => acc + v, 0) /
+          allBucketNotionals.length
+        : 1;
+
+    let cumBid = 0;
+    const groupedBids: CapitalClusterZone[] = Array.from(bidMap.entries())
+      .sort((a, b) => b[0] - a[0])
+      .map(([priceBucket, info]) => {
+        cumBid += info.notional;
+        const mult = meanBucketUsd > 0 ? info.notional / meanBucketUsd : 1;
+        return {
+          side: "BID" as const,
+          priceBucket,
+          quantity: info.qty,
+          notionalUsd: info.notional,
+          cumulativeUsd: cumBid,
+          depthPercent: 0,
+          shareOfSidePercent:
+            totalBidCapitalUsd > 0
+              ? (info.notional / totalBidCapitalUsd) * 100
+              : 0,
+          distanceFromMidPercent:
+            snap.midPrice > 0
+              ? ((priceBucket - snap.midPrice) / snap.midPrice) * 100
+              : 0,
+          distanceFromMidUsd: priceBucket - snap.midPrice,
+          wallMultiple: mult,
+          isWhaleCluster: mult >= 2.0,
+          levelsMerged: info.count,
+        };
+      });
+
+    let cumAsk = 0;
+    const groupedAsks: CapitalClusterZone[] = Array.from(askMap.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([priceBucket, info]) => {
+        cumAsk += info.notional;
+        const mult = meanBucketUsd > 0 ? info.notional / meanBucketUsd : 1;
+        return {
+          side: "ASK" as const,
+          priceBucket,
+          quantity: info.qty,
+          notionalUsd: info.notional,
+          cumulativeUsd: cumAsk,
+          depthPercent: 0,
+          shareOfSidePercent:
+            totalAskCapitalUsd > 0
+              ? (info.notional / totalAskCapitalUsd) * 100
+              : 0,
+          distanceFromMidPercent:
+            snap.midPrice > 0
+              ? ((priceBucket - snap.midPrice) / snap.midPrice) * 100
+              : 0,
+          distanceFromMidUsd: priceBucket - snap.midPrice,
+          wallMultiple: mult,
+          isWhaleCluster: mult >= 2.0,
+          levelsMerged: info.count,
+        };
+      });
+
+    const maxBucketNotional = Math.max(
+      ...groupedBids.map((b) => b.notionalUsd),
+      ...groupedAsks.map((a) => a.notionalUsd),
+      1,
+    );
+    for (const b of groupedBids) {
+      b.depthPercent = Math.min(100, (b.notionalUsd / maxBucketNotional) * 100);
+    }
+    for (const a of groupedAsks) {
+      a.depthPercent = Math.min(100, (a.notionalUsd / maxBucketNotional) * 100);
+    }
+
+    const topBidClusters = [...groupedBids]
+      .sort((a, b) => b.notionalUsd - a.notionalUsd)
+      .slice(0, 4);
+    const topAskClusters = [...groupedAsks]
+      .sort((a, b) => b.notionalUsd - a.notionalUsd)
+      .slice(0, 4);
+
+    return {
+      bucketStepUsd: step,
+      availableBuckets,
+      groupedBids,
+      groupedAsks,
+      topBidClusters,
+      topAskClusters,
+      totalBidCapitalUsd,
+      totalAskCapitalUsd,
+      bidAskRatio:
+        totalAskCapitalUsd > 0 ? totalBidCapitalUsd / totalAskCapitalUsd : 1,
+    };
+  }
+
+  /**
    * Pure quantitative L2 Orderbook analytics computation.
-   * Accepts raw [priceStr, qtyStr][] arrays for bids and asks.
+   * Accepts raw [priceStr, qtyStr][] arrays for bids and asks (up to 1000 levels).
    */
   public static computeL2Analytics(
     symbol: string,
@@ -288,7 +553,7 @@ export class OrderbookService {
       }))
       .filter((x) => x.price > 0 && x.quantity > 0)
       .sort((a, b) => b.price - a.price)
-      .slice(0, 20);
+      .slice(0, 1000);
 
     const parsedAsks = rawAsks
       .map(([p, q]) => ({
@@ -297,7 +562,7 @@ export class OrderbookService {
       }))
       .filter((x) => x.price > 0 && x.quantity > 0)
       .sort((a, b) => a.price - b.price)
-      .slice(0, 20);
+      .slice(0, 1000);
 
     const bestBid = parsedBids[0]?.price || 0;
     const bestAsk = parsedAsks[0]?.price || 0;

@@ -3,22 +3,23 @@
 Institutional digital asset execution cockpit, 24-hour multi-venue whale tranche clustering engine, L2 Stoikov micro-price orderbook analyzer, Deribit options gamma radar, and BlackRock Aladdin risk matrix.
 
 [![Live Terminal](https://img.shields.io/badge/Live_Terminal-GitHub_Pages-8caa6b?style=for-the-badge&logo=github)](https://markankamaransheogarat-sys.github.io/apex-terminal/)
-[![Tests](https://img.shields.io/badge/Tests-95%2F95_Passed-8caa6b?style=for-the-badge)](https://github.com/markankamaransheogarat-sys/apex-terminal)
+[![Tests](https://img.shields.io/badge/Tests-101%2F101_Passed-8caa6b?style=for-the-badge)](https://github.com/markankamaransheogarat-sys/apex-terminal)
 [![Design System](https://img.shields.io/badge/Theme-Jarvis--Tech_Concrete_%26_Paper-d8b876?style=for-the-badge)](https://markankamaransheogarat-sys.github.io/apex-terminal/)
-[![Zero-Key Feeds](https://img.shields.io/badge/Feeds-5_Direct_WebSockets_%2B_Deribit-5d909b?style=for-the-badge)](https://github.com/markankamaransheogarat-sys/apex-terminal)
+[![Zero-Key Feeds](https://img.shields.io/badge/Feeds-Binance_%2B_Coinbase_%2B_Deribit_%2B_DeFiLlama-5d909b?style=for-the-badge)](https://github.com/markankamaransheogarat-sys/apex-terminal)
 
 👉 **Launch Live Web Terminal**: [https://markankamaransheogarat-sys.github.io/apex-terminal/](https://markankamaransheogarat-sys.github.io/apex-terminal/)
 
 ---
 
-## ⚡ 14 Institutional `<GO>` Modules
+## ⚡ 15 Institutional `<GO>` Modules
 
 | Screen Command | Module & Quantitative Capabilities |
 | :--- | :--- |
 | **`MARKET <GO>`** `[F2]` | Live multi-asset streaming matrix (`Binance WS`), 24h orderflow bid/ask imbalance, and Fear & Greed index. |
 | **`📈 CHART <GO>`** `[F5]` | 60 FPS HTML5 Canvas candlestick chart with session VWAP, horizontal Volume Profile (POC), and overlaid **Whale Campaign VWAP lines & block trade footprints**. |
-| **`🧱 BOOK <GO>`** | 100ms L2 Orderbook Depth (`@depth20@100ms`), **Stoikov (2018) Micro-Price & micro-alpha skew (bps)**, 20-level OBI, **Liquidity Wall Detector** ($\ge 2.2\times$ mean depth), and \$500K market sweep slippage estimator. |
-| **`🧮 EXEC <GO>`** | **Quant Execution Calculator**: **Wall-Protected Stop-Loss** (shielded behind L2 Bid/Ask Wall + $0.45\times \text{ATR}_{14}$ noise buffer), **Half-Kelly Position Sizer**, `TP1 (1.5R)` / `TP2 (2.5R)` / `TP3 (50x Magnet)`, and **25x–100x Liquidation Magnet Cluster Heatmap**. |
+| **`🧱 BOOK <GO>`** | **Deep 1,000-Level L2 Orderbook** (`limit=1000` REST + `@depth20@100ms` WS), **Interactive Price-Bucket Zoom (`$1`–`$250`)**, **Top 4 Bid/Ask Capital Concentration Zones** (`ГДЕ СИДИТ ОСНОВНАЯ МАССА БАБЛА`), **Stoikov (2018) Micro-Price & micro-alpha skew (bps)**, and \$500K market sweep slippage estimator. |
+| **`🧬 QUANT <GO>`** | **6-Factor Master Institutional Confluence Matrix (`-100..+100`)**, **Spot vs. Perp 12h CVD Divergence**, **Live US Coinbase Spot Premium (bps)**, **Statistical Arbitrage (StatArb) Pairs Z-Score & Ornstein-Uhlenbeck Half-Life**, and **DeFiLlama Global Stablecoin Mint/Burn Impulse & Chain TVL**. |
+| **`🧮 EXEC <GO>`** | **Quant Execution Calculator & 1-Click Live Blotter**: **Wall-Protected Stop-Loss** (shielded behind L2 Bid/Ask Wall + $0.45\times \text{ATR}_{14}$ noise buffer), **Half-Kelly Position Sizer**, **HVN-Anchored 25x–100x Liquidation Magnets**, and **1-Click Position Blotter** with auto-Breakeven SL lock on `TP1 (1.5R)`. |
 | **`🦅 DERIV <GO>`** | **Deribit Live Options Gamma & Max Pain Matrix** (`BTC` & `ETH` Max Pain Strike, Call Wall, Put Wall, Put/Call Ratio, Mean IV %) + **4-Quadrant OI Regime Matrix** (`LONG_BUILDUP`, `SHORT_COVERING`, `SHORT_BUILDUP`, `LONG_CAPITULATION`), Smart Money vs Retail L/S, and **RVOL / Whale CVD Divergence Scanner**. |
 | **`🐋 WHALE <GO>`** `[F6]` | **24-Hour IndexedDB Whale Persistence**, 5 live zero-key streams (`Binance Spot aggTrade` with exact `l - f + 1` swept orders, `Bybit V5`, `OKX V5`, `Binance !forceOrder`, `mempool.space`), **4-Factor Tranche Clustering Engine** (`ICEBERG_CLIP`, `CROSS_VENUE_SWEEP`, `TWAP_CAMPAIGN`, `ORDERBOOK_SWEEP`), **Hybrid Alpha Engine**, **Live Signal Attribution Tracker (bps, MFE, Win Rate, Profit Factor)**, and 1-click CSV/JSON export. |
 | **`⚡ LIQ <GO>`** `[F7]` | Real-time multi-venue forced liquidations radar (`Binance Futures` + `Bybit V5` + `OKX V5`) with Long vs Short casualty ratio breakdown. |

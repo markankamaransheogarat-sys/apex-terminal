@@ -62,6 +62,7 @@ import { AlphaPerformanceTracker } from "../feeds/alpha-tracker.js";
 import { DerivativesIntelligenceService } from "../derivatives/derivatives-intelligence.js";
 import { QuantExecutionCalculator } from "../execution/quant-execution-calculator.js";
 import { ExecutionBlotterService } from "../execution/execution-blotter.js";
+import { WorldClassQuantService } from "../quant/world-class-alpha.js";
 
 class ApexWebTerminal {
   private binanceWs: BinanceWsFeedManager;
@@ -74,9 +75,11 @@ class ApexWebTerminal {
   private chartService: ChartService;
   private chartRenderer: CanvasChartRenderer | null = null;
   private orderbookService: OrderbookService;
+  private orderbookBucketStep: number = 0;
   private alphaTracker: AlphaPerformanceTracker;
   private derivService: DerivativesIntelligenceService;
   private executionBlotter: ExecutionBlotterService;
+  private quantEngine: WorldClassQuantService;
   private newsService: NewsService;
   private newsSnapshot: NewsWireSnapshot | null = null;
   private newsFilter: string = "ALL";
@@ -103,6 +106,7 @@ class ApexWebTerminal {
     | "BOOK"
     | "EXEC"
     | "DERIV"
+    | "QUANT"
     | "RISK"
     | "ARB"
     | "FUNDING"
@@ -135,6 +139,7 @@ class ApexWebTerminal {
     this.alphaTracker = new AlphaPerformanceTracker();
     this.derivService = new DerivativesIntelligenceService();
     this.executionBlotter = new ExecutionBlotterService();
+    this.quantEngine = new WorldClassQuantService();
     this.newsService = NewsService.getInstance();
     this.alertManager = AlertManager.getInstance();
 
@@ -225,6 +230,7 @@ class ApexWebTerminal {
             <button class="cmd-chip" data-cmd="BOOK">🧱 BOOK &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="EXEC">🧮 EXEC &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="DERIV">🦅 DERIV &lt;GO&gt;</button>
+            <button class="cmd-chip" data-cmd="QUANT">🧬 QUANT &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="WHALE">🐋 WHALE &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="LIQ">⚡ LIQ &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="RISK">RISK &lt;GO&gt;</button>
@@ -386,6 +392,14 @@ class ApexWebTerminal {
       cleaned === "SCAN"
     ) {
       this.activeScreen = "DERIV";
+    } else if (
+      cleaned === "QUANT" ||
+      cleaned === "STAT" ||
+      cleaned === "STATARB" ||
+      cleaned === "ALPHA" ||
+      cleaned === "CONFLUENCE"
+    ) {
+      this.activeScreen = "QUANT";
     } else if (
       cleaned === "ARB" ||
       cleaned === "BASIS" ||
@@ -585,9 +599,16 @@ class ApexWebTerminal {
     });
     this.orderbookService.start();
 
-    // 10. Deribit Options & Smart Money Positioning
+    // 10. Deribit Options & Smart Money Positioning + World-Class Quant Flows
     this.derivService.fetchLiveDeribitOptions().then(() => {
-      if (this.activeScreen === "DERIV") this.render();
+      if (this.activeScreen === "DERIV" || this.activeScreen === "QUANT")
+        this.render();
+    });
+    this.quantEngine.fetchLiveSpotVsPerpFlows(this.tickers).then(() => {
+      if (this.activeScreen === "QUANT") this.render();
+    });
+    this.quantEngine.fetchDeFiLlamaMacroLiquidity().then(() => {
+      if (this.activeScreen === "QUANT") this.render();
     });
 
     setInterval(() => {
@@ -599,8 +620,11 @@ class ApexWebTerminal {
       this.onChainService.fetchOpenInterest(this.prevPrices);
       this.newsService.fetchLatestNews().then((s) => (this.newsSnapshot = s));
       this.derivService.fetchLiveDeribitOptions().then(() => {
-        if (this.activeScreen === "DERIV") this.render();
+        if (this.activeScreen === "DERIV" || this.activeScreen === "QUANT")
+          this.render();
       });
+      this.quantEngine.fetchLiveSpotVsPerpFlows(this.tickers).catch(() => {});
+      this.quantEngine.fetchDeFiLlamaMacroLiquidity().catch(() => {});
       this.orderbookService.scanMultiAssetWalls().catch(() => {});
     }, 45000);
   }
@@ -703,6 +727,8 @@ class ApexWebTerminal {
       this.renderExecScreen(body);
     } else if (this.activeScreen === "DERIV") {
       this.renderDerivScreen(body);
+    } else if (this.activeScreen === "QUANT") {
+      this.renderQuantScreen(body);
     } else if (this.activeScreen === "WHALE") {
       this.renderWhaleScreen(body);
     } else if (this.activeScreen === "LIQ") {
@@ -990,57 +1016,68 @@ class ApexWebTerminal {
       container.innerHTML = `
         <div class="terminal-screen screen-book">
           <div class="screen-header">
-            <h2 class="screen-title">🧱 L2 ORDERBOOK MICROSTRUCTURE, STOIKOV MICRO-PRICE &amp; LIQUIDITY WALLS</h2>
+            <h2 class="screen-title">🧱 DEEP 1000-LEVEL L2 ORDERBOOK, PRICE-BUCKET ZOOM &amp; CAPITAL CONCENTRATION RADAR</h2>
           </div>
-          <div class="p-4 text-center">Connecting to Binance Spot L2 Depth (@depth20@100ms)...</div>
+          <div class="p-4 text-center">Connecting to Binance Spot Deep L2 Depth (1000-Level Snapshot + @depth20@100ms)...</div>
         </div>
       `;
       return;
     }
 
+    const grouped = OrderbookService.groupOrderbookByBucket(
+      snap,
+      this.orderbookBucketStep,
+    );
     const skewSign = snap.microPriceSkewBps >= 0 ? "+" : "";
     const skewClass = snap.microPriceSkewBps >= 0 ? "text-green" : "text-red";
     const obiSign = snap.obi20Percent >= 0 ? "+" : "";
     const obiClass = snap.obi20Percent >= 0 ? "text-green" : "text-red";
     const multiWalls = this.orderbookService.getMultiAssetWalls();
+    const fmtPrice = (p: number) =>
+      p < 1
+        ? `$${p.toFixed(4)}`
+        : p < 10
+          ? `$${p.toFixed(3)}`
+          : p < 100
+            ? `$${p.toFixed(2)}`
+            : `$${p.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
     container.innerHTML = `
       <div class="terminal-screen screen-book">
         <div class="screen-header">
           <div class="screen-title-group">
-            <h2 class="screen-title">🧱 L2 ORDERBOOK DEPTH, STOIKOV MICRO-PRICE &amp; INSTITUTIONAL LIQUIDITY WALLS</h2>
-            <span class="screen-subtitle">BINANCE @DEPTH20@100MS · STOIKOV (2018) FAIR MICRO-PRICE · MULTI-ASSET LIMIT WALL RADAR (&ge;2.2X MEAN DEPTH)</span>
+            <h2 class="screen-title">🧱 DEEP 1000-LEVEL L2 ORDERBOOK, PRICE-BUCKET ZOOM &amp; WHALE CAPITAL CLUSTERS</h2>
+            <span class="screen-subtitle">BINANCE 1,000-LEVEL REST + 100MS STREAM · INTERACTIVE ZOOM BUCKETS · STOIKOV (2018) FAIR MICRO-PRICE · ГДЕ СИДИТ ОСНОВНАЯ МАССА БАБЛА</span>
           </div>
-          <div class="filter-group">
-            ${symbols
-              .map(
-                (s) => `
-              <button class="filter-btn ${curSymbol.startsWith(s) ? "active" : ""}" data-book-sym="${s}USDT">
-                ${s}
-              </button>
-            `,
-              )
-              .join("")}
+          <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+            <div class="filter-group">
+              ${symbols
+                .map(
+                  (s) => `
+                <button class="filter-btn ${curSymbol.startsWith(s) ? "active" : ""}" data-book-sym="${s}USDT">
+                  ${s}
+                </button>
+              `,
+                )
+                .join("")}
+            </div>
           </div>
         </div>
 
+        <!-- MULTI-ASSET L2 WALL RADAR -->
         ${
           multiWalls.length > 0
             ? `
-          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px 12px; align-items: center;">
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px 12px; align-items: center;">
             <span style="font-size: 10px; font-weight: 700; color: var(--amber-bright); letter-spacing: 0.08em;">🛰️ MULTI-ASSET L2 WALL RADAR (CLICK TO FOCUS):</span>
             ${multiWalls
               .map((mw) => {
                 const isBid = mw.dominantWallSide === "BID_WALL";
-                const priceFmt =
-                  mw.dominantWallPrice < 10
-                    ? `$${mw.dominantWallPrice.toFixed(4)}`
-                    : `$${mw.dominantWallPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
                 return `
                   <button class="terminal-btn-sm" data-book-sym="${mw.symbol}" style="${mw.symbol === curSymbol ? "border-color: var(--amber-bright);" : ""}">
                     <strong>${mw.asset}</strong>
                     <span class="${isBid ? "text-green" : "text-red"}" style="margin-left: 4px;">
-                      ${isBid ? "🟢 BID" : "🔴 ASK"} ${mw.dominantWallMultiple.toFixed(1)}x (${priceFmt} · $${Math.round(mw.dominantWallUsd / 1000)}K)
+                      ${isBid ? "🟢 BID" : "🔴 ASK"} ${mw.dominantWallMultiple.toFixed(1)}x (${fmtPrice(mw.dominantWallPrice)} · $${Math.round(mw.dominantWallUsd / 1000)}K)
                     </span>
                   </button>
                 `;
@@ -1051,76 +1088,174 @@ class ApexWebTerminal {
             : ""
         }
 
+        <!-- INTERACTIVE ORDERBOOK ZOOM / PRICE-BUCKET GROUPING BAR -->
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; background: linear-gradient(90deg, rgba(16,185,129,0.08), rgba(15,23,42,0.9)); border: 1px solid rgba(16,185,129,0.3); border-radius: 6px; padding: 10px 14px;">
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span style="font-size: 11px; font-weight: 800; color: var(--green); letter-spacing: 0.06em;">🔍 МАСШТАБ СТАКАНА (PRICE-BUCKET ZOOM — УВЕЛИЧИТЬ ПУЛЫ ЛИКВИДНОСТИ):</span>
+            ${grouped.availableBuckets
+              .map((b) => {
+                const isActive =
+                  Math.abs(b.step - grouped.bucketStepUsd) < 1e-6;
+                return `
+                  <button class="filter-btn ${isActive ? "active" : ""}" data-book-bucket="${b.step}" style="${isActive ? "background: var(--green); color: #04130d; font-weight: 800; border-color: var(--green);" : ""}">
+                    ${b.label}
+                  </button>
+                `;
+              })
+              .join("")}
+          </div>
+          <div style="font-size: 11px; color: var(--text-secondary);">
+            Глубина книги: <strong>${snap.bids.length + snap.asks.length} уровней</strong> · Шаг агрегации: <strong class="text-amber">$${grouped.bucketStepUsd}</strong> · Суммарно в стакане: <strong class="text-green">BID $${(grouped.totalBidCapitalUsd / 1e6).toFixed(2)}M</strong> vs <strong class="text-red">ASK $${(grouped.totalAskCapitalUsd / 1e6).toFixed(2)}M</strong>
+          </div>
+        </div>
+
         <div class="aladdin-kpi-grid">
           <div class="kpi-card">
             <span class="kpi-label">STOIKOV MICRO-PRICE &amp; ALPHA SKEW</span>
             <span class="kpi-val ${skewClass}">
-              $${snap.microPrice.toLocaleString(undefined, { minimumFractionDigits: snap.microPrice < 10 ? 4 : 2, maximumFractionDigits: snap.microPrice < 10 ? 4 : 2 })}
+              ${fmtPrice(snap.microPrice)}
             </span>
             <span class="kpi-sub">SKEW VS MID: <strong>${skewSign}${snap.microPriceSkewBps.toFixed(2)} bps</strong> · SPREAD ${snap.spreadBps.toFixed(2)} bps</span>
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">20-LEVEL ORDERBOOK IMBALANCE (OBI-20)</span>
+            <span class="kpi-label">DEEP ORDERBOOK IMBALANCE (1000-LVL)</span>
             <span class="kpi-val ${obiClass}">${obiSign}${snap.obi20Percent.toFixed(1)}%</span>
-            <span class="kpi-sub">${snap.regime} · BID $${Math.round(snap.totalBidDepthUsd).toLocaleString()} / ASK $${Math.round(snap.totalAskDepthUsd).toLocaleString()}</span>
+            <span class="kpi-sub">${snap.regime} · BID $${(grouped.totalBidCapitalUsd / 1e6).toFixed(2)}M / ASK $${(grouped.totalAskCapitalUsd / 1e6).toFixed(2)}M</span>
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">BIGGEST BID WALL (SUPPORT ПЛИТА)</span>
+            <span class="kpi-label">ГЛАВНАЯ ПЛИТА ПОКУПОК (TOP BID CLUSTER)</span>
             <span class="kpi-val text-green">
-              ${snap.biggestBidWall ? `$${snap.biggestBidWall.price.toLocaleString(undefined, { minimumFractionDigits: snap.midPrice < 10 ? 4 : 2 })}` : "--"}
+              ${grouped.topBidClusters[0] ? fmtPrice(grouped.topBidClusters[0].priceBucket) : "--"}
             </span>
             <span class="kpi-sub">
-              ${snap.biggestBidWall ? `$${Math.round(snap.biggestBidWall.notionalUsd).toLocaleString()} (${snap.biggestBidWall.wallMultiple.toFixed(1)}x avg level)` : "--"}
+              ${
+                grouped.topBidClusters[0]
+                  ? `$${Math.round(grouped.topBidClusters[0].notionalUsd).toLocaleString()} (${grouped.topBidClusters[0].shareOfSidePercent.toFixed(1)}% всей книги · -${grouped.topBidClusters[0].distanceFromMidPercent.toFixed(2)}%)`
+                  : "--"
+              }
             </span>
           </div>
 
           <div class="kpi-card">
-            <span class="kpi-label">BIGGEST ASK WALL (RESISTANCE ПЛИТА)</span>
+            <span class="kpi-label">ГЛАВНАЯ ПЛИТА ПРОДАЖ (TOP ASK CLUSTER)</span>
             <span class="kpi-val text-red">
-              ${snap.biggestAskWall ? `$${snap.biggestAskWall.price.toLocaleString(undefined, { minimumFractionDigits: snap.midPrice < 10 ? 4 : 2 })}` : "--"}
+              ${grouped.topAskClusters[0] ? fmtPrice(grouped.topAskClusters[0].priceBucket) : "--"}
             </span>
             <span class="kpi-sub">
-              ${snap.biggestAskWall ? `$${Math.round(snap.biggestAskWall.notionalUsd).toLocaleString()} (${snap.biggestAskWall.wallMultiple.toFixed(1)}x avg level)` : "--"}
+              ${
+                grouped.topAskClusters[0]
+                  ? `$${Math.round(grouped.topAskClusters[0].notionalUsd).toLocaleString()} (${grouped.topAskClusters[0].shareOfSidePercent.toFixed(1)}% всей книги · +${grouped.topAskClusters[0].distanceFromMidPercent.toFixed(2)}%)`
+                  : "--"
+              }
             </span>
           </div>
         </div>
 
-        <div class="real-source-banner mt-2">
-          <span class="live-pulse"></span>
-          <span><strong>$500K SWEEP SLIPPAGE ESTIMATOR:</strong> Market BUY Impact: <strong>+${snap.slippageBuy1M_Bps.toFixed(2)} bps</strong> · Market SELL Impact: <strong>-${snap.slippageSell1M_Bps.toFixed(2)} bps</strong></span>
-          <span class="returns-badge badge-live">● 100MS L2 DEPTH STREAM ACTIVE</span>
+        <!-- TOP CAPITAL CONCENTRATION ZONES (ГДЕ СИДИТ ОСНОВНАЯ МАССА БАБЛА) -->
+        <div class="mt-3" style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px 14px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
+            <div>
+              <span style="font-size: 12px; font-weight: 800; color: var(--amber-bright); letter-spacing: 0.06em;">
+                🐋 TOP CAPITAL CONCENTRATION ZONES — ГДЕ СИДИТ ОСНОВНАЯ МАССА БАБЛА (ШАГ $${grouped.bucketStepUsd})
+              </span>
+              <span style="font-size: 11px; color: var(--text-muted); margin-left: 8px;">
+                Автоматический радар 4 крупнейших зон сосредоточения лимитного капитала покупателей и продавцов по всей глубине стакана
+              </span>
+            </div>
+            <span class="returns-badge badge-live">● $500K SWEEP IMPACT: BUY +${snap.slippageBuy1M_Bps.toFixed(2)} bps / SELL -${snap.slippageSell1M_Bps.toFixed(2)} bps</span>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+            <!-- TOP 4 BID CAPITAL CLUSTERS -->
+            <div style="background: rgba(16, 185, 129, 0.04); border: 1px solid rgba(16, 185, 129, 0.22); border-radius: 6px; padding: 10px;">
+              <div style="font-size: 11px; font-weight: 800; color: var(--green); margin-bottom: 8px; letter-spacing: 0.05em;">
+                🟢 ТОП-4 ЗОНЫ КАПИТАЛА ПОКУПАТЕЛЕЙ (BID LIQUIDITY POOLS — ЗОНЫ ОТСКОКА &amp; ЗАЩИТЫ)
+              </div>
+              <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
+                ${grouped.topBidClusters
+                  .map(
+                    (c, idx) => `
+                  <div style="background: rgba(10, 15, 29, 0.85); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 5px; padding: 8px 10px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                      <span style="font-size: 10px; color: var(--text-muted); font-weight: 700;">#${idx + 1} ЗОНА ПОКУПОК</span>
+                      <span class="regime-badge regime-squeeze">${c.shareOfSidePercent.toFixed(1)}% КНИГИ</span>
+                    </div>
+                    <div style="font-size: 15px; font-weight: 800; color: var(--green); margin: 3px 0;">
+                      ${fmtPrice(c.priceBucket)} <span style="font-size: 11px; color: var(--text-secondary);">— $${Math.round(c.notionalUsd).toLocaleString()}</span>
+                    </div>
+                    <div style="font-size: 10px; color: var(--text-secondary);">
+                      Объем: <strong>${c.quantity.toFixed(3)} ${snap.asset}</strong> · Дистанция: <strong>-${c.distanceFromMidPercent.toFixed(2)}% (-$${c.distanceFromMidUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })})</strong> · Ордеров: ${c.levelsMerged}
+                    </div>
+                  </div>
+                `,
+                  )
+                  .join("")}
+              </div>
+            </div>
+
+            <!-- TOP 4 ASK CAPITAL CLUSTERS -->
+            <div style="background: rgba(239, 68, 68, 0.04); border: 1px solid rgba(239, 68, 68, 0.22); border-radius: 6px; padding: 10px;">
+              <div style="font-size: 11px; font-weight: 800; color: var(--red); margin-bottom: 8px; letter-spacing: 0.05em;">
+                🔴 ТОП-4 ЗОНЫ КАПИТАЛА ПРОДАВЦОВ (ASK LIQUIDITY POOLS — ЗОНЫ СОПРОТИВЛЕНИЯ &amp; ФИКСАЦИИ)
+              </div>
+              <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
+                ${grouped.topAskClusters
+                  .map(
+                    (c, idx) => `
+                  <div style="background: rgba(10, 15, 29, 0.85); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 5px; padding: 8px 10px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                      <span style="font-size: 10px; color: var(--text-muted); font-weight: 700;">#${idx + 1} ЗОНА ПРОДАЖ</span>
+                      <span class="regime-badge regime-extreme">${c.shareOfSidePercent.toFixed(1)}% КНИГИ</span>
+                    </div>
+                    <div style="font-size: 15px; font-weight: 800; color: var(--red); margin: 3px 0;">
+                      ${fmtPrice(c.priceBucket)} <span style="font-size: 11px; color: var(--text-secondary);">— $${Math.round(c.notionalUsd).toLocaleString()}</span>
+                    </div>
+                    <div style="font-size: 10px; color: var(--text-secondary);">
+                      Объем: <strong>${c.quantity.toFixed(3)} ${snap.asset}</strong> · Дистанция: <strong>+${c.distanceFromMidPercent.toFixed(2)}% (+$${c.distanceFromMidUsd.toLocaleString(undefined, { maximumFractionDigits: 2 })})</strong> · Ордеров: ${c.levelsMerged}
+                    </div>
+                  </div>
+                `,
+                  )
+                  .join("")}
+              </div>
+            </div>
+          </div>
         </div>
 
+        <!-- GROUPED BIDS & ASKS LADDERS -->
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;" class="mt-3">
           <!-- BIDS LADDER -->
           <div class="market-matrix-table-wrap">
             <table class="terminal-table">
               <thead>
                 <tr>
-                  <th>BID PRICE (${snap.asset})</th>
+                  <th>BID BUCKET ($${grouped.bucketStepUsd})</th>
                   <th>SIZE (${snap.asset})</th>
-                  <th>NOTIONAL ($)</th>
+                  <th>CAPITAL IN ZONE ($)</th>
                   <th>CUMULATIVE ($)</th>
-                  <th>WALL DETECTOR</th>
+                  <th>SHARE / WALL RADAR</th>
                 </tr>
               </thead>
               <tbody>
-                ${snap.bids
-                  .slice(0, 15)
+                ${grouped.groupedBids
+                  .slice(0, 20)
                   .map(
                     (b) => `
-                  <tr class="${b.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, var(--up-tint) ${b.depthPercent.toFixed(0)}%, transparent ${b.depthPercent.toFixed(0)}%);">
-                    <td class="text-green font-bold">$${b.price.toLocaleString(undefined, { minimumFractionDigits: b.price < 10 ? 4 : 2 })}</td>
+                  <tr class="${b.isWhaleCluster ? "row-highlight" : ""}" style="background: linear-gradient(90deg, var(--up-tint) ${b.depthPercent.toFixed(0)}%, transparent ${b.depthPercent.toFixed(0)}%);">
+                    <td class="text-green font-bold">
+                      ${fmtPrice(b.priceBucket)}
+                      <span style="font-size: 9px; color: var(--text-muted); margin-left: 4px;">(-${b.distanceFromMidPercent.toFixed(2)}%)</span>
+                    </td>
                     <td>${b.quantity.toLocaleString(undefined, { maximumFractionDigits: 3 })}</td>
-                    <td>$${Math.round(b.notionalUsd).toLocaleString()}</td>
+                    <td class="font-bold">$${Math.round(b.notionalUsd).toLocaleString()}</td>
                     <td class="text-dim">$${Math.round(b.cumulativeUsd).toLocaleString()}</td>
                     <td>
                       ${
-                        b.isWall
-                          ? `<span class="regime-badge regime-squeeze">🧱 BID WALL (${b.wallMultiple.toFixed(1)}x)</span>`
-                          : `<span class="text-dim">${b.wallMultiple.toFixed(1)}x</span>`
+                        b.isWhaleCluster
+                          ? `<span class="regime-badge regime-squeeze">🐋 ПУЛ $${Math.round(b.notionalUsd / 1000)}K (${b.wallMultiple.toFixed(1)}x · ${b.shareOfSidePercent.toFixed(1)}%)</span>`
+                          : `<span class="text-dim">${b.shareOfSidePercent.toFixed(1)}% (${b.wallMultiple.toFixed(1)}x)</span>`
                       }
                     </td>
                   </tr>
@@ -1136,28 +1271,31 @@ class ApexWebTerminal {
             <table class="terminal-table">
               <thead>
                 <tr>
-                  <th>ASK PRICE (${snap.asset})</th>
+                  <th>ASK BUCKET ($${grouped.bucketStepUsd})</th>
                   <th>SIZE (${snap.asset})</th>
-                  <th>NOTIONAL ($)</th>
+                  <th>CAPITAL IN ZONE ($)</th>
                   <th>CUMULATIVE ($)</th>
-                  <th>WALL DETECTOR</th>
+                  <th>SHARE / WALL RADAR</th>
                 </tr>
               </thead>
               <tbody>
-                ${snap.asks
-                  .slice(0, 15)
+                ${grouped.groupedAsks
+                  .slice(0, 20)
                   .map(
                     (a) => `
-                  <tr class="${a.isWall ? "row-highlight" : ""}" style="background: linear-gradient(90deg, var(--down-tint) ${a.depthPercent.toFixed(0)}%, transparent ${a.depthPercent.toFixed(0)}%);">
-                    <td class="text-red font-bold">$${a.price.toLocaleString(undefined, { minimumFractionDigits: a.price < 10 ? 4 : 2 })}</td>
+                  <tr class="${a.isWhaleCluster ? "row-highlight" : ""}" style="background: linear-gradient(90deg, var(--down-tint) ${a.depthPercent.toFixed(0)}%, transparent ${a.depthPercent.toFixed(0)}%);">
+                    <td class="text-red font-bold">
+                      ${fmtPrice(a.priceBucket)}
+                      <span style="font-size: 9px; color: var(--text-muted); margin-left: 4px;">(+${a.distanceFromMidPercent.toFixed(2)}%)</span>
+                    </td>
                     <td>${a.quantity.toLocaleString(undefined, { maximumFractionDigits: 3 })}</td>
-                    <td>$${Math.round(a.notionalUsd).toLocaleString()}</td>
+                    <td class="font-bold">$${Math.round(a.notionalUsd).toLocaleString()}</td>
                     <td class="text-dim">$${Math.round(a.cumulativeUsd).toLocaleString()}</td>
                     <td>
                       ${
-                        a.isWall
-                          ? `<span class="regime-badge regime-extreme">🧱 ASK WALL (${a.wallMultiple.toFixed(1)}x)</span>`
-                          : `<span class="text-dim">${a.wallMultiple.toFixed(1)}x</span>`
+                        a.isWhaleCluster
+                          ? `<span class="regime-badge regime-extreme">🐋 ПУЛ $${Math.round(a.notionalUsd / 1000)}K (${a.wallMultiple.toFixed(1)}x · ${a.shareOfSidePercent.toFixed(1)}%)</span>`
+                          : `<span class="text-dim">${a.shareOfSidePercent.toFixed(1)}% (${a.wallMultiple.toFixed(1)}x)</span>`
                       }
                     </td>
                   </tr>
@@ -1178,9 +1316,24 @@ class ApexWebTerminal {
         );
         if (sym) {
           playCommandGo();
+          this.orderbookBucketStep = 0; // Reset to optimal default bucket for new symbol
           this.orderbookService.switchSymbol(sym).then(() => {
             this.render();
           });
+        }
+      });
+    });
+
+    document.querySelectorAll("[data-book-bucket]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const stepStr = (e.currentTarget as HTMLElement).getAttribute(
+          "data-book-bucket",
+        );
+        const stepVal = parseFloat(stepStr || "0");
+        if (stepVal > 0) {
+          playCommandGo();
+          this.orderbookBucketStep = stepVal;
+          this.renderOrderbookScreen(container);
         }
       });
     });
@@ -3369,6 +3522,369 @@ class ApexWebTerminal {
   }
 
   // ==========================================
+  // SCREEN: WORLD-CLASS QUANT CONFLUENCE, SPOT VS PERP CVD, STATARB & MACRO LIQUIDITY (QUANT <GO>)
+  // ==========================================
+  private renderQuantScreen(container: HTMLElement): void {
+    const btcOpt = this.derivService.getOptionsSnapshot("BTC");
+    const ethOpt = this.derivService.getOptionsSnapshot("ETH");
+    const masterRows = this.quantEngine.computeMasterConfluenceMatrix({
+      tickers: this.tickers,
+      fundingRates: this.fundingRates,
+      whaleTrades: this.whaleStream.getWhaleTrades(),
+      orderbookSnapshots: (sym: string) =>
+        this.orderbookService.getSymbol() === sym
+          ? this.orderbookService.getSnapshot()
+          : null,
+      btcOptions: btcOpt,
+      ethOptions: ethOpt,
+    });
+    const statArbRows = WorldClassQuantService.computeStatArbMatrix(
+      this.returnsService.getReturns(),
+      this.tickers,
+    );
+    const macroLiq = this.quantEngine.getMacroLiquidity();
+
+    const fmtPrice = (p: number) =>
+      p < 1
+        ? `$${p.toFixed(4)}`
+        : p < 10
+          ? `$${p.toFixed(3)}`
+          : p < 100
+            ? `$${p.toFixed(2)}`
+            : `$${p.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+    const avgConfluence =
+      masterRows.length > 0
+        ? Math.round(
+            masterRows.reduce((s, r) => s + r.masterScore, 0) /
+              masterRows.length,
+          )
+        : 0;
+    const sortedByBull = [...masterRows].sort(
+      (a, b) => b.masterScore - a.masterScore,
+    );
+    const topBull = sortedByBull[0];
+    const topBear = sortedByBull[sortedByBull.length - 1];
+    const btcSpotPerp = this.quantEngine.getSpotPerpMetrics("BTCUSDT");
+    const activeStatArb = statArbRows.filter((s) => s.signal !== "EQUILIBRIUM");
+
+    const verdictBadge = (grade: string, score: number) => {
+      const sign = score >= 0 ? "+" : "";
+      if (grade === "A+ INSTITUTIONAL LONG") {
+        return `<span class="regime-badge regime-squeeze">🟢 ${grade} (${sign}${score})</span>`;
+      }
+      if (grade === "B+ ACCUMULATE LONG") {
+        return `<span class="regime-badge regime-elevated" style="color: var(--green); border-color: var(--green);">🟢 ${grade} (${sign}${score})</span>`;
+      }
+      if (grade === "A+ INSTITUTIONAL SHORT") {
+        return `<span class="regime-badge regime-extreme">🔴 ${grade} (${sign}${score})</span>`;
+      }
+      if (grade === "B+ DISTRIBUTE SHORT") {
+        return `<span class="regime-badge regime-elevated" style="color: var(--red); border-color: var(--red);">🔴 ${grade} (${sign}${score})</span>`;
+      }
+      return `<span class="regime-badge regime-calm">⚪ ${grade} (${sign}${score})</span>`;
+    };
+
+    const flowRegimeBadge = (r: string) => {
+      if (r === "BULLISH_SPOT_ABSORPTION") {
+        return `<span class="regime-badge regime-squeeze">🐋 SPOT ABSORPTION (СКУПКА НА СПОТЕ)</span>`;
+      }
+      if (r === "BEARISH_PERP_TRAP") {
+        return `<span class="regime-badge regime-extreme">⚠️ PERP FOMO TRAP (СПОТ ПРОДАЕТ)</span>`;
+      }
+      if (r === "SYNCHRONIZED_BULL_INFLOW") {
+        return `<span class="regime-badge regime-squeeze">🚀 SYNC BULL INFLOW (СПОТ+ФЬЮЧИ)</span>`;
+      }
+      if (r === "SYNCHRONIZED_BEAR_OUTFLOW") {
+        return `<span class="regime-badge regime-extreme">🩸 SYNC BEAR OUTFLOW (СЛИВ)</span>`;
+      }
+      return `<span class="regime-badge regime-calm">⚪ BALANCED FLOW</span>`;
+    };
+
+    const usdtItem = macroLiq.stablecoins.find((s) => s.symbol === "USDT");
+    const usdcItem = macroLiq.stablecoins.find((s) => s.symbol === "USDC");
+    const usdeItem = macroLiq.stablecoins.find((s) => s.symbol === "USDe");
+
+    container.innerHTML = `
+      <div class="terminal-screen screen-quant">
+        <div class="screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">🧬 WORLD-CLASS QUANT CONFLUENCE, SPOT VS PERP CVD, US COINBASE PREMIUM &amp; STATARB</h2>
+            <span class="screen-subtitle">6-FACTOR INSTITUTIONAL ALPHA MATRIX (-100..+100) · SPOT VS PERP CVD DIVERGENCE · COINBASE USD PREMIUM · ORNSTEIN-UHLENBECK STATARB · DEFILLAMA STABLECOIN IMPULSE</span>
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <button class="terminal-btn-sm" id="btn-refresh-quant">🔄 REFRESH LIVE QUANT FEEDS</button>
+          </div>
+        </div>
+
+        <!-- TOP KPI SUMMARY -->
+        <div class="aladdin-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">MARKET-WIDE 6-FACTOR CONFLUENCE</span>
+            <span class="kpi-val ${avgConfluence >= 0 ? "text-green" : "text-red"}">
+              ${avgConfluence >= 0 ? "+" : ""}${avgConfluence} / 100
+            </span>
+            <span class="kpi-sub">
+              TOP LONG: <strong class="text-green">${topBull ? `${topBull.asset} (${topBull.masterScore >= 0 ? "+" : ""}${topBull.masterScore})` : "--"}</strong> ·
+              TOP SHORT: <strong class="text-red">${topBear ? `${topBear.asset} (${topBear.masterScore >= 0 ? "+" : ""}${topBear.masterScore})` : "--"}</strong>
+            </span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">US INSTITUTIONAL COINBASE PREMIUM (BTC)</span>
+            <span class="kpi-val ${btcSpotPerp.coinbasePremiumBps >= 0 ? "text-green" : "text-red"}">
+              ${btcSpotPerp.coinbasePremiumBps >= 0 ? "+" : ""}${btcSpotPerp.coinbasePremiumBps.toFixed(2)} bps
+            </span>
+            <span class="kpi-sub">
+              CB USD: <strong>$${btcSpotPerp.coinbaseSpotPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}</strong> vs BINANCE USDT
+            </span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">GLOBAL STABLECOIN LIQUIDITY (DEFILLAMA)</span>
+            <span class="kpi-val ${macroLiq.netMint24hUsd >= 0 ? "text-green" : "text-red"}">
+              $${(macroLiq.totalStablecoinMcapUsd / 1e9).toFixed(2)}B
+            </span>
+            <span class="kpi-sub">
+              24H MINT/BURN: <strong>${macroLiq.netMint24hUsd >= 0 ? "+" : "-"}$${(Math.abs(macroLiq.netMint24hUsd) / 1e6).toFixed(0)}M</strong> ·
+              7D: <strong>${macroLiq.netMint7dUsd >= 0 ? "+" : "-"}$${(Math.abs(macroLiq.netMint7dUsd) / 1e9).toFixed(2)}B</strong>
+            </span>
+          </div>
+
+          <div class="kpi-card">
+            <span class="kpi-label">ACTIVE STATARB COINTEGRATION SIGNALS</span>
+            <span class="kpi-val text-amber">${activeStatArb.length} / ${statArbRows.length} PAIRS</span>
+            <span class="kpi-sub">
+              EXTREME Z-SCORE: <strong>${statArbRows[0] ? `${statArbRows[0].pairLabel} (Z = ${statArbRows[0].spreadZScore >= 0 ? "+" : ""}${statArbRows[0].spreadZScore.toFixed(2)}σ)` : "--"}</strong>
+            </span>
+          </div>
+        </div>
+
+        <!-- SECTION 1: 6-FACTOR MASTER INSTITUTIONAL CONFLUENCE MATRIX & SPOT VS PERP CVD -->
+        <div class="market-matrix-table-wrap mt-3">
+          <div style="padding: 10px 14px; border-bottom: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <div>
+              <span style="font-size: 12px; font-weight: 800; color: var(--amber-bright); letter-spacing: 0.06em;">
+                🎯 1. 6-FACTOR MASTER INSTITUTIONAL CONFLUENCE MATRIX (-100 TO +100) &amp; SPOT VS PERP CVD DIVERGENCE
+              </span>
+              <span style="font-size: 11px; color: var(--text-muted); margin-left: 8px;">
+                Веса: Spot vs Perp CVD (25%) · US Coinbase Premium (15%) · 24h Whale Flow (20%) · L2 Stoikov &amp; Walls (15%) · OI &amp; Funding (15%) · Deribit Options (10%)
+              </span>
+            </div>
+            <span class="returns-badge badge-live">● 1-CLICK SEND TO EXEC &lt;GO&gt;</span>
+          </div>
+          <table class="terminal-table">
+            <thead>
+              <tr>
+                <th>ASSET</th>
+                <th>PRICE</th>
+                <th>COMPOSITE VERDICT (-100..+100)</th>
+                <th>SPOT CVD (12H)</th>
+                <th>PERP CVD (12H)</th>
+                <th>SPOT VS PERP REGIME</th>
+                <th>US COINBASE PREMIUM</th>
+                <th>FACTOR SCORES (S/CB/W/L2/OI/O)</th>
+                <th>INSTITUTIONAL THESIS &amp; 1-CLICK TRADE</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${masterRows
+                .map((r) => {
+                  const sp = r.spotPerpMetrics;
+                  const spotCvdM = sp.spotCvd12hUsd / 1e6;
+                  const perpCvdM = sp.perpCvd12hUsd / 1e6;
+                  const cbPrem = sp.coinbasePremiumBps;
+                  const tradeDir = r.recommendedDirection;
+                  const f = r.factors;
+                  return `
+                  <tr>
+                    <td><strong>${r.asset}</strong></td>
+                    <td class="font-bold">${fmtPrice(r.price)}</td>
+                    <td>${verdictBadge(r.grade, r.masterScore)}</td>
+                    <td class="${spotCvdM >= 0 ? "text-green" : "text-red"} font-bold">
+                      ${spotCvdM >= 0 ? "+" : "-"}$${Math.abs(spotCvdM).toFixed(2)}M
+                    </td>
+                    <td class="${perpCvdM >= 0 ? "text-green" : "text-red"} font-bold">
+                      ${perpCvdM >= 0 ? "+" : "-"}$${Math.abs(perpCvdM).toFixed(2)}M
+                    </td>
+                    <td>${flowRegimeBadge(sp.regime)}</td>
+                    <td class="${cbPrem >= 0 ? "text-green" : "text-red"} font-bold">
+                      ${cbPrem >= 0 ? "+" : ""}${cbPrem.toFixed(2)} bps
+                    </td>
+                    <td style="font-size: 10px; font-family: var(--font-mono); color: var(--text-secondary);">
+                      S:${f.spotVsPerpScore >= 0 ? "+" : ""}${f.spotVsPerpScore} |
+                      CB:${f.coinbasePremiumScore >= 0 ? "+" : ""}${f.coinbasePremiumScore} |
+                      W:${f.whaleTrancheScore >= 0 ? "+" : ""}${f.whaleTrancheScore} |
+                      L2:${f.orderbookMicroScore >= 0 ? "+" : ""}${f.orderbookMicroScore} |
+                      OI:${f.oiFundingScore >= 0 ? "+" : ""}${f.oiFundingScore} |
+                      O:${f.optionsGammaScore >= 0 ? "+" : ""}${f.optionsGammaScore}
+                    </td>
+                    <td>
+                      <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+                        <span style="font-size: 11px; color: var(--text-primary);">${r.thesisSummary}</span>
+                        <button class="terminal-btn-sm" data-quant-exec-sym="${r.symbol}" data-quant-exec-dir="${tradeDir}" style="white-space: nowrap; border-color: ${tradeDir === "LONG" ? "var(--green)" : "var(--red)"}; color: ${tradeDir === "LONG" ? "var(--green)" : "var(--red)"};">
+                          ⚡ ${tradeDir} ${r.asset}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                `;
+                })
+                .join("")}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- SECTION 2: STATISTICAL ARBITRAGE (STATARB) & ORNSTEIN-UHLENBECK MEAN-REVERSION MATRIX -->
+        <div class="market-matrix-table-wrap mt-3">
+          <div style="padding: 10px 14px; border-bottom: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <div>
+              <span style="font-size: 12px; font-weight: 800; color: var(--green); letter-spacing: 0.06em;">
+                📐 2. STATISTICAL ARBITRAGE (STATARB), PAIRS Z-SCORE &amp; ORNSTEIN-UHLENBECK HALF-LIFE SCANNER
+              </span>
+              <span style="font-size: 11px; color: var(--text-muted); margin-left: 8px;">
+                60-дневная коинтеграция пар $S_t = \\ln(P_A) - \\beta \\ln(P_B)$, OLS Hedge Ratio ($\\beta$), Z-Score отклонения ($\\sigma$) и период полураспада возврата к среднему
+              </span>
+            </div>
+            <span class="returns-badge badge-live">● MARKET-NEUTRAL PAIRS ALPHA</span>
+          </div>
+          <table class="terminal-table">
+            <thead>
+              <tr>
+                <th>PAIR (A / B)</th>
+                <th>CORRELATION (60D)</th>
+                <th>OLS HEDGE BETA (β)</th>
+                <th>SPREAD Z-SCORE (σ)</th>
+                <th>OU HALF-LIFE (DAYS)</th>
+                <th>STATARB SIGNAL</th>
+                <th>MARKET-NEUTRAL EXECUTION CALL</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${statArbRows
+                .map((s) => {
+                  const zSign = s.spreadZScore >= 0 ? "+" : "";
+                  const zClass =
+                    Math.abs(s.spreadZScore) >= 1.5
+                      ? s.spreadZScore > 0
+                        ? "text-red"
+                        : "text-green"
+                      : "text-secondary";
+                  const sigBadge =
+                    s.signal === "STATARB_LONG_A_SHORT_B"
+                      ? `<span class="regime-badge regime-squeeze">🟢 LONG ${s.legA} / SHORT ${s.legB}</span>`
+                      : s.signal === "STATARB_SHORT_A_LONG_B"
+                        ? `<span class="regime-badge regime-extreme">🔴 SHORT ${s.legA} / LONG ${s.legB}</span>`
+                        : s.signal === "LEAD_LAG_CATCHUP_A"
+                          ? `<span class="regime-badge regime-elevated">⚡ LEAD-LAG CATCHUP (${s.legA})</span>`
+                          : `<span class="regime-badge regime-calm">⚪ EQUILIBRIUM (|Z| &lt; 1.6)</span>`;
+                  return `
+                  <tr>
+                    <td><strong>${s.pairLabel}</strong></td>
+                    <td class="${s.correlation60d >= 0.7 ? "text-green" : "text-amber"} font-bold">${(s.correlation60d * 100).toFixed(1)}%</td>
+                    <td><strong>${s.hedgeBeta.toFixed(2)}x</strong></td>
+                    <td class="${zClass} font-bold" style="font-size: 13px;">${zSign}${s.spreadZScore.toFixed(2)}σ</td>
+                    <td><strong>${s.halfLifeDays.toFixed(1)} дн.</strong></td>
+                    <td>${sigBadge}</td>
+                    <td style="font-size: 11px; color: var(--text-primary);">${s.actionableCall}</td>
+                  </tr>
+                `;
+                })
+                .join("")}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- SECTION 3: DEFILLAMA GLOBAL STABLECOIN MINT/BURN & L1/L2 CHAIN TVL VELOCITY -->
+        <div class="mt-3" style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+          <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px 14px;">
+            <div style="font-size: 12px; font-weight: 800; color: var(--amber-bright); margin-bottom: 8px; letter-spacing: 0.05em;">
+              🏦 3A. DEFILLAMA GLOBAL STABLECOIN MINT / BURN IMPULSE (ПОРОХ НА РЫНКЕ)
+            </div>
+            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px;">
+              Эмиссия стейблкоинов — главный опережающий индикатор притока живого институционального фиата в крипто-экосистему.
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px;">
+              <div style="background: rgba(10, 15, 29, 0.8); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
+                <div style="font-size: 10px; color: var(--text-muted);">TETHER (USDT)</div>
+                <div style="font-size: 15px; font-weight: 800; color: var(--green);">$${((usdtItem?.circulatingUsd ?? 142e9) / 1e9).toFixed(2)}B</div>
+              </div>
+              <div style="background: rgba(10, 15, 29, 0.8); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
+                <div style="font-size: 10px; color: var(--text-muted);">CIRCLE (USDC)</div>
+                <div style="font-size: 15px; font-weight: 800; color: var(--amber-bright);">$${((usdcItem?.circulatingUsd ?? 56e9) / 1e9).toFixed(2)}B</div>
+              </div>
+              <div style="background: rgba(10, 15, 29, 0.8); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
+                <div style="font-size: 10px; color: var(--text-muted);">ETHENA (USDe)</div>
+                <div style="font-size: 15px; font-weight: 800; color: var(--text-primary);">$${((usdeItem?.circulatingUsd ?? 5.9e9) / 1e9).toFixed(2)}B</div>
+              </div>
+            </div>
+            <div style="font-size: 11px; color: var(--text-primary); padding: 8px 10px; background: rgba(16, 185, 129, 0.06); border-left: 3px solid var(--green); border-radius: 4px;">
+              <strong>Режим макро-ликвидности (${macroLiq.liquidityRegime}):</strong> 24h Net Mint/Burn ${macroLiq.netMint24hUsd >= 0 ? "+" : "-"}$${(Math.abs(macroLiq.netMint24hUsd) / 1e6).toFixed(0)}M · 7d Net Mint/Burn ${macroLiq.netMint7dUsd >= 0 ? "+" : "-"}$${(Math.abs(macroLiq.netMint7dUsd) / 1e9).toFixed(2)}B
+            </div>
+          </div>
+
+          <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px 14px;">
+            <div style="font-size: 12px; font-weight: 800; color: var(--amber-bright); margin-bottom: 8px; letter-spacing: 0.05em;">
+              ⛓️ 3B. DEFILLAMA CROSS-CHAIN L1/L2 TVL LOCKED CAPITAL (КАПИТАЛ В СЕТЯХ)
+            </div>
+            <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px;">
+              Распределение институционального DeFi-капитала (Total Value Locked) по ключевым блокчейнам первого уровня.
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
+              ${macroLiq.topChains
+                .map(
+                  (c) => `
+                <div style="background: rgba(10, 15, 29, 0.8); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
+                  <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-size: 10px; font-weight: 700; color: var(--text-secondary);">${c.chain.toUpperCase()}</span>
+                    <span style="font-size: 10px; color: var(--amber-bright);">${c.sharePercent.toFixed(1)}%</span>
+                  </div>
+                  <div style="font-size: 14px; font-weight: 800; color: var(--text-primary); margin-top: 2px;">
+                    $${(c.tvlUsd / 1e9).toFixed(2)}B
+                  </div>
+                </div>
+              `,
+                )
+                .join("")}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document
+      .getElementById("btn-refresh-quant")
+      ?.addEventListener("click", () => {
+        playCommandGo();
+        Promise.all([
+          this.quantEngine.fetchLiveSpotVsPerpFlows(this.tickers),
+          this.quantEngine.fetchDeFiLlamaMacroLiquidity(),
+        ]).then(() => {
+          this.renderQuantScreen(container);
+        });
+      });
+
+    document.querySelectorAll("[data-quant-exec-sym]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const el = e.currentTarget as HTMLElement;
+        const sym = el.getAttribute("data-quant-exec-sym");
+        const dir = el.getAttribute("data-quant-exec-dir") as
+          "LONG" | "SHORT" | null;
+        if (sym && dir) {
+          playCommandGo();
+          this.execSymbol = sym;
+          this.execDirection = dir;
+          this.activeScreen = "EXEC";
+          this.orderbookService.switchSymbol(sym).then(() => {
+            this.render();
+          });
+          this.render();
+        }
+      });
+    });
+  }
+
+  // ==========================================
   // SCREEN: HELP & GRAMMAR
   // ==========================================
   private renderHelpScreen(container: HTMLElement): void {
@@ -3391,7 +3907,12 @@ class ApexWebTerminal {
 
           <div class="help-card">
             <span class="help-cmd">BOOK &lt;GO&gt;</span>
-            <p>100ms L2 Orderbook Depth, Stoikov Micro-Price skew (bps), Liquidity Wall Detector, and $500K slippage estimator.</p>
+            <p>Deep 1,000-Level L2 Orderbook with interactive Price-Bucket Zoom, Top 4 Bid/Ask Capital Concentration Zones, Stoikov Micro-Price, and $500K slippage.</p>
+          </div>
+
+          <div class="help-card">
+            <span class="help-cmd">QUANT &lt;GO&gt;</span>
+            <p>6-Factor Institutional Confluence Matrix (-100..+100), Spot vs Perp CVD Divergence, US Coinbase Premium (bps), Ornstein-Uhlenbeck StatArb, and DeFiLlama Stablecoin Impulse.</p>
           </div>
 
           <div class="help-card">
