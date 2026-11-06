@@ -61,6 +61,7 @@ import { OrderbookService } from "../orderbook/orderbook-service.js";
 import { AlphaPerformanceTracker } from "../feeds/alpha-tracker.js";
 import { DerivativesIntelligenceService } from "../derivatives/derivatives-intelligence.js";
 import { QuantExecutionCalculator } from "../execution/quant-execution-calculator.js";
+import { ExecutionBlotterService } from "../execution/execution-blotter.js";
 
 class ApexWebTerminal {
   private binanceWs: BinanceWsFeedManager;
@@ -75,6 +76,7 @@ class ApexWebTerminal {
   private orderbookService: OrderbookService;
   private alphaTracker: AlphaPerformanceTracker;
   private derivService: DerivativesIntelligenceService;
+  private executionBlotter: ExecutionBlotterService;
   private newsService: NewsService;
   private newsSnapshot: NewsWireSnapshot | null = null;
   private newsFilter: string = "ALL";
@@ -132,6 +134,7 @@ class ApexWebTerminal {
     );
     this.alphaTracker = new AlphaPerformanceTracker();
     this.derivService = new DerivativesIntelligenceService();
+    this.executionBlotter = new ExecutionBlotterService();
     this.newsService = NewsService.getInstance();
     this.alertManager = AlertManager.getInstance();
 
@@ -486,6 +489,7 @@ class ApexWebTerminal {
 
       this.prevPrices.set(ticker.symbol, ticker.price);
       this.tickers.set(ticker.symbol, ticker);
+      this.executionBlotter.updateWithLivePrices(this.prevPrices);
 
       // Feed live tick into chart if active
       if (ticker.symbol === this.chartService.getSymbol()) {
@@ -597,6 +601,7 @@ class ApexWebTerminal {
       this.derivService.fetchLiveDeribitOptions().then(() => {
         if (this.activeScreen === "DERIV") this.render();
       });
+      this.orderbookService.scanMultiAssetWalls().catch(() => {});
     }, 45000);
   }
 
@@ -997,13 +1002,14 @@ class ApexWebTerminal {
     const skewClass = snap.microPriceSkewBps >= 0 ? "text-green" : "text-red";
     const obiSign = snap.obi20Percent >= 0 ? "+" : "";
     const obiClass = snap.obi20Percent >= 0 ? "text-green" : "text-red";
+    const multiWalls = this.orderbookService.getMultiAssetWalls();
 
     container.innerHTML = `
       <div class="terminal-screen screen-book">
         <div class="screen-header">
           <div class="screen-title-group">
             <h2 class="screen-title">🧱 L2 ORDERBOOK DEPTH, STOIKOV MICRO-PRICE &amp; INSTITUTIONAL LIQUIDITY WALLS</h2>
-            <span class="screen-subtitle">BINANCE @DEPTH20@100MS · STOIKOV (2018) FAIR MICRO-PRICE · LIMIT WALL DETECTOR (&ge;2.2X MEAN DEPTH)</span>
+            <span class="screen-subtitle">BINANCE @DEPTH20@100MS · STOIKOV (2018) FAIR MICRO-PRICE · MULTI-ASSET LIMIT WALL RADAR (&ge;2.2X MEAN DEPTH)</span>
           </div>
           <div class="filter-group">
             ${symbols
@@ -1017,6 +1023,33 @@ class ApexWebTerminal {
               .join("")}
           </div>
         </div>
+
+        ${
+          multiWalls.length > 0
+            ? `
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px 12px; align-items: center;">
+            <span style="font-size: 10px; font-weight: 700; color: var(--amber-bright); letter-spacing: 0.08em;">🛰️ MULTI-ASSET L2 WALL RADAR (CLICK TO FOCUS):</span>
+            ${multiWalls
+              .map((mw) => {
+                const isBid = mw.dominantWallSide === "BID_WALL";
+                const priceFmt =
+                  mw.dominantWallPrice < 10
+                    ? `$${mw.dominantWallPrice.toFixed(4)}`
+                    : `$${mw.dominantWallPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+                return `
+                  <button class="terminal-btn-sm" data-book-sym="${mw.symbol}" style="${mw.symbol === curSymbol ? "border-color: var(--amber-bright);" : ""}">
+                    <strong>${mw.asset}</strong>
+                    <span class="${isBid ? "text-green" : "text-red"}" style="margin-left: 4px;">
+                      ${isBid ? "🟢 BID" : "🔴 ASK"} ${mw.dominantWallMultiple.toFixed(1)}x (${priceFmt} · $${Math.round(mw.dominantWallUsd / 1000)}K)
+                    </span>
+                  </button>
+                `;
+              })
+              .join("")}
+          </div>
+        `
+            : ""
+        }
 
         <div class="aladdin-kpi-grid">
           <div class="kpi-card">
@@ -2700,11 +2733,8 @@ class ApexWebTerminal {
         ? chartData.candles
         : [];
 
-    // Get L2 Orderbook snapshot if symbol matches
-    const obSnap =
-      this.orderbookService.getSymbol() === sym
-        ? this.orderbookService.getSnapshot()
-        : null;
+    // Get L2 Orderbook snapshot across multi-asset cache or live WS
+    const obSnap = this.orderbookService.getSnapshotForSymbol(sym);
 
     // Get Open Interest & Funding Rate
     const oiSnap = this.onChainService.getSnapshot();
@@ -2721,6 +2751,9 @@ class ApexWebTerminal {
     // Alpha tracker win rate & profit factor
     const priceMap = new Map<string, number>();
     this.tickers.forEach((v, k) => priceMap.set(k, v.price));
+    this.executionBlotter.updateWithLivePrices(priceMap);
+    const blotterSummary = this.executionBlotter.getSummary();
+
     const alphaSummary = this.alphaTracker.syncSignalsAndPrices(
       this.whaleStream.getAlphaSignals(),
       priceMap,
@@ -2731,6 +2764,7 @@ class ApexWebTerminal {
       livePrice,
       oiUsd,
       fundingRate,
+      candles,
     );
 
     const setup = QuantExecutionCalculator.calculateTradeSetup({
@@ -2769,8 +2803,8 @@ class ApexWebTerminal {
       <div class="terminal-screen screen-exec">
         <div class="screen-header">
           <div class="screen-title-group">
-            <h2 class="screen-title">🧮 QUANT EXECUTION CALCULATOR, WALL-PROTECTED STOP &amp; LIQUIDATION MAGNETS</h2>
-            <span class="screen-subtitle">ATR VOLATILITY BUFFER · L2 LIQUIDITY WALL SHIELD · HALF-KELLY POSITION SIZING · 25X-100X LIQUIDATION POOLS</span>
+            <h2 class="screen-title">🧮 QUANT EXECUTION CALCULATOR, WALL-PROTECTED STOP &amp; HVN LIQUIDATION MAGNETS</h2>
+            <span class="screen-subtitle">ATR VOLATILITY BUFFER · L2 LIQUIDITY WALL SHIELD · HALF-KELLY SIZING · VOLUME-PROFILE HVN LIQUIDATION POOLS</span>
           </div>
           <div class="header-stat-pills">
             ${symbols
@@ -2850,19 +2884,24 @@ class ApexWebTerminal {
           </div>
 
           <div class="whale-kpi-card">
-            <span class="kpi-label">PRIMARY LIQUIDATION MAGNET</span>
+            <span class="kpi-label">PRIMARY HVN LIQUIDATION MAGNET</span>
             <span class="kpi-val ${magnets.primaryMagnet.side === "SHORT_LIQ_MAGNET" ? "text-green" : "text-red"}">${fmtPrice(magnets.primaryMagnet.priceLevel)}</span>
-            <span class="kpi-sub">${magnets.primaryMagnet.tier} ${magnets.primaryMagnet.side === "SHORT_LIQ_MAGNET" ? "Short Squeeze" : "Long Flush"} ($${(magnets.primaryMagnet.estimatedPoolUsd / 1e6).toFixed(1)}M Pool)</span>
+            <span class="kpi-sub">${magnets.primaryMagnet.tier} ${magnets.primaryMagnet.side === "SHORT_LIQ_MAGNET" ? "Short Squeeze" : "Long Flush"} · POC ${fmtPrice(magnets.pocPrice)}</span>
           </div>
         </div>
 
         <!-- Two-Column Institutional Execution Ticket & Liquidation Magnet Ladder -->
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px;">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; margin-bottom: 16px;">
           <!-- Left: Actionable Trade Ticket -->
           <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 16px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
               <span style="font-weight: 700; color: var(--amber-bright); letter-spacing: 0.06em;">🎯 INSTITUTIONAL EXECUTION TICKET (${sym})</span>
-              <span class="badge ${this.execDirection === "LONG" ? "badge-green" : "badge-red"}">${this.execDirection} ${setup.recommendedLeverage}x</span>
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <span class="badge ${this.execDirection === "LONG" ? "badge-green" : "badge-red"}">${this.execDirection} ${setup.recommendedLeverage}x</span>
+                <button id="btn-exec-open-position" class="btn-go" style="padding: 5px 12px; font-size: 11px;">
+                  ⚡ EXECUTE 1R TICKET
+                </button>
+              </div>
             </div>
 
             <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 14px; line-height: 1.5; background: var(--bg-panel); padding: 10px; border-radius: 4px; border-left: 3px solid var(--amber-bright);">
@@ -2892,19 +2931,19 @@ class ApexWebTerminal {
                   <td class="text-red">-$${Math.round(setup.maxRiskDollarUsd).toLocaleString()}</td>
                 </tr>
                 <tr>
-                  <td><strong class="text-green">✅ TAKE PROFIT 1 (+1.5R Conservative)</strong></td>
+                  <td><strong class="text-green">✅ TAKE PROFIT 1 (+1.5R · 35% + Auto-BE)</strong></td>
                   <td class="text-green"><strong>${fmtPrice(setup.takeProfit1_15R)}</strong></td>
                   <td class="text-green">+${(setup.stopDistancePercent * 1.5).toFixed(2)}%</td>
                   <td class="text-green">+$${Math.round(setup.maxRiskDollarUsd * 1.5).toLocaleString()}</td>
                 </tr>
                 <tr>
-                  <td><strong class="text-green">🚀 TAKE PROFIT 2 (+2.5R Core Target)</strong></td>
+                  <td><strong class="text-green">🚀 TAKE PROFIT 2 (+2.5R · 35% Core)</strong></td>
                   <td class="text-green"><strong>${fmtPrice(setup.takeProfit2_25R)}</strong></td>
                   <td class="text-green">+${(setup.stopDistancePercent * 2.5).toFixed(2)}%</td>
                   <td class="text-green">+$${Math.round(setup.maxRiskDollarUsd * 2.5).toLocaleString()}</td>
                 </tr>
                 <tr>
-                  <td><strong class="text-amber">🧲 TAKE PROFIT 3 (50x Liq Magnet)</strong></td>
+                  <td><strong class="text-amber">🧲 TAKE PROFIT 3 (50x HVN Magnet · 30%)</strong></td>
                   <td class="text-amber"><strong>${fmtPrice(setup.takeProfit3_Magnet)}</strong></td>
                   <td class="text-amber">${(((setup.takeProfit3_Magnet - setup.optimalEntryPrice) / setup.optimalEntryPrice) * 100).toFixed(2)}%</td>
                   <td class="text-amber">+$${Math.round(Math.abs(setup.takeProfit3_Magnet - setup.optimalEntryPrice) * setup.positionSizeCoins).toLocaleString()}</td>
@@ -2913,20 +2952,21 @@ class ApexWebTerminal {
             </table>
           </div>
 
-          <!-- Right: Liquidation Magnet Cluster Map -->
+          <!-- Right: Liquidation Magnet Cluster Map (Anchored to Volume Profile HVN) -->
           <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 16px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
-              <span style="font-weight: 700; color: var(--cyan-bright); letter-spacing: 0.06em;">🧲 LIQUIDATION MAGNET HEATMAP (OI CLUSTER POOLS)</span>
-              <span style="font-size: 11px; color: var(--text-muted);">OI: $${(oiUsd / 1e9).toFixed(2)}B</span>
+              <span style="font-weight: 700; color: var(--cyan-bright); letter-spacing: 0.06em;">🧲 HVN-ANCHORED LIQUIDATION MAGNET HEATMAP</span>
+              <span style="font-size: 11px; color: var(--text-muted);">POC: ${fmtPrice(magnets.pocPrice)} · OI: $${(oiUsd / 1e9).toFixed(2)}B</span>
             </div>
 
             <table class="terminal-table">
               <thead>
                 <tr>
                   <th>CLUSTER POOL</th>
+                  <th>HVN ANCHOR</th>
                   <th>MAGNET PRICE</th>
                   <th>DIST %</th>
-                  <th>EST. POOL ($)</th>
+                  <th>POOL ($)</th>
                   <th>GRAVITY</th>
                 </tr>
               </thead>
@@ -2944,12 +2984,13 @@ class ApexWebTerminal {
                           ${isShortLiq ? "🔼" : "🔽"} ${z.tier} ${isShortLiq ? "SHORT SQUEEZE" : "LONG FLUSH"}
                         </span>
                       </td>
+                      <td class="text-dim">${fmtPrice(z.hvnAnchorPrice)}</td>
                       <td><strong>${fmtPrice(z.priceLevel)}</strong></td>
                       <td class="${z.distancePercent >= 0 ? "text-green" : "text-red"}">
                         ${z.distancePercent >= 0 ? "+" : ""}${z.distancePercent.toFixed(2)}%
                       </td>
                       <td>$${(z.estimatedPoolUsd / 1e6).toFixed(1)}M</td>
-                      <td style="width: 110px;">
+                      <td style="width: 90px;">
                         <div style="background: var(--bg-void); height: 8px; border-radius: 4px; overflow: hidden;">
                           <div style="width: ${z.gravityScore}%; height: 100%; background: ${barColor};"></div>
                         </div>
@@ -2958,6 +2999,105 @@ class ApexWebTerminal {
                   `;
                   })
                   .join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Bottom: Live Active Positions & Execution Blotter -->
+        <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
+            <div>
+              <span style="font-weight: 700; color: var(--amber-bright); letter-spacing: 0.06em;">📋 LIVE EXECUTION BLOTTER &amp; ACTIVE POSITIONS (AUTO TP1/TP2/TP3 + BREAKEVEN SHIELD)</span>
+            </div>
+            <div style="display: flex; gap: 12px; align-items: center; font-size: 11px;">
+              <span>OPEN: <strong>${blotterSummary.openPositions.length}</strong></span>
+              <span>UNREALIZED: <strong class="${blotterSummary.totalUnrealizedPnlUsd >= 0 ? "text-green" : "text-red"}">${blotterSummary.totalUnrealizedPnlUsd >= 0 ? "+" : ""}$${blotterSummary.totalUnrealizedPnlUsd.toLocaleString()}</strong></span>
+              <span>REALIZED: <strong class="${blotterSummary.totalRealizedPnlUsd >= 0 ? "text-green" : "text-red"}">${blotterSummary.totalRealizedPnlUsd >= 0 ? "+" : ""}$${blotterSummary.totalRealizedPnlUsd.toLocaleString()}</strong></span>
+              <span>WIN RATE: <strong class="text-cyan">${blotterSummary.winRatePercent.toFixed(1)}%</strong> (${blotterSummary.avgRMultiple >= 0 ? "+" : ""}${blotterSummary.avgRMultiple.toFixed(2)}R avg)</span>
+              ${
+                blotterSummary.closedPositions.length > 0
+                  ? `<button id="btn-blotter-clear" class="terminal-btn-sm">🧹 CLEAR CLOSED</button>`
+                  : ""
+              }
+            </div>
+          </div>
+
+          <div class="market-matrix-table-wrap">
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>STATUS / ASSET</th>
+                  <th>SIDE &amp; LEV</th>
+                  <th>SIZE</th>
+                  <th>ENTRY &rarr; MARK</th>
+                  <th>ACTIVE STOP-LOSS</th>
+                  <th>LADDER PROGRESS (TP1 / TP2 / TP3)</th>
+                  <th>NET PnL ($ &amp; R)</th>
+                  <th>EXECUTION ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${
+                  blotterSummary.openPositions.length === 0 &&
+                  blotterSummary.closedPositions.length === 0
+                    ? `<tr><td colspan="8" style="text-align:center; color: var(--text-muted); padding: 18px;">No active or closed positions yet. Click <strong>⚡ EXECUTE 1R TICKET</strong> above to open a live-tracked position with automatic TP1/TP2/TP3 and Breakeven SL protection.</td></tr>`
+                    : [
+                        ...blotterSummary.openPositions,
+                        ...blotterSummary.closedPositions.slice(0, 8),
+                      ]
+                        .map((pos) => {
+                          const isOpen = pos.status === "OPEN";
+                          const pnlClass =
+                            pos.totalPnlUsd >= 0 ? "text-green" : "text-red";
+                          const pnlSign = pos.totalPnlUsd >= 0 ? "+" : "";
+                          return `
+                          <tr>
+                            <td>
+                              <span class="badge ${isOpen ? "badge-cyan" : pos.totalPnlUsd >= 0 ? "badge-green" : "badge-red"}">${pos.status}</span>
+                              <strong style="margin-left: 6px;">${pos.asset}</strong>
+                            </td>
+                            <td>
+                              <span class="${pos.direction === "LONG" ? "text-green" : "text-red"}" style="font-weight: 700;">
+                                ${pos.direction} ${pos.leverage}x
+                              </span>
+                            </td>
+                            <td>${pos.remainingSizeCoins.toFixed(4)} / ${pos.initialSizeCoins.toFixed(4)} ${pos.asset}</td>
+                            <td>${fmtPrice(pos.entryPrice)} &rarr; <strong>${fmtPrice(pos.currentPrice)}</strong></td>
+                            <td class="${pos.isBreakevenStop ? "text-cyan" : "text-red"}">
+                              <strong>${fmtPrice(pos.stopLossPrice)}</strong>
+                              ${pos.isBreakevenStop ? `<span class="badge badge-cyan" style="margin-left:4px;">BE LOCKED</span>` : ""}
+                            </td>
+                            <td>
+                              <span class="badge ${pos.tp1Hit ? "badge-green" : ""}" style="opacity:${pos.tp1Hit ? "1" : "0.45"};">TP1 1.5R</span>
+                              <span class="badge ${pos.tp2Hit ? "badge-green" : ""}" style="opacity:${pos.tp2Hit ? "1" : "0.45"};">TP2 2.5R</span>
+                              <span class="badge ${pos.tp3Hit ? "badge-amber" : ""}" style="opacity:${pos.tp3Hit ? "1" : "0.45"};">TP3 MAG</span>
+                            </td>
+                            <td class="${pnlClass}">
+                              <strong>${pnlSign}$${pos.totalPnlUsd.toLocaleString()}</strong>
+                              <span style="margin-left:4px;">(${pnlSign}${pos.currentRMultiple.toFixed(2)}R)</span>
+                            </td>
+                            <td>
+                              ${
+                                isOpen
+                                  ? `
+                                <div style="display:flex; gap:6px;">
+                                  ${
+                                    !pos.isBreakevenStop
+                                      ? `<button class="terminal-btn-sm btn-pos-be" data-pos-id="${pos.id}" title="Move Stop-Loss to Entry Price">🛡️ SL &rarr; BE</button>`
+                                      : ""
+                                  }
+                                  <button class="terminal-btn-sm btn-pos-close" data-pos-id="${pos.id}" style="color: var(--red-bright);">✖ CLOSE MKT</button>
+                                </div>
+                              `
+                                  : `<span class="text-dim" style="font-size:10px;">${pos.closeNote || "Closed"}</span>`
+                              }
+                            </td>
+                          </tr>
+                        `;
+                        })
+                        .join("")
+                }
               </tbody>
             </table>
           </div>
@@ -2975,10 +3115,56 @@ class ApexWebTerminal {
           if (this.orderbookService.getSymbol() !== s) {
             this.orderbookService.switchSymbol(s);
           }
+          if (this.chartService.getSymbol() !== s) {
+            this.chartService
+              .loadCandles(s, this.chartService.getTimeframe())
+              .then(() => {
+                if (this.activeScreen === "EXEC")
+                  this.renderExecScreen(container);
+              });
+          }
           this.renderExecScreen(container);
         }
       });
     });
+
+    document
+      .getElementById("btn-exec-open-position")
+      ?.addEventListener("click", () => {
+        playCommandGo();
+        this.executionBlotter.openPositionFromSetup(setup);
+        this.renderExecScreen(container);
+      });
+
+    container.querySelectorAll(".btn-pos-be").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const id = (e.currentTarget as HTMLElement).getAttribute("data-pos-id");
+        if (id) {
+          playCommandGo();
+          this.executionBlotter.moveStopToBreakeven(id);
+          this.renderExecScreen(container);
+        }
+      });
+    });
+
+    container.querySelectorAll(".btn-pos-close").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const id = (e.currentTarget as HTMLElement).getAttribute("data-pos-id");
+        if (id) {
+          playCommandGo();
+          this.executionBlotter.closePositionAtMarket(id);
+          this.renderExecScreen(container);
+        }
+      });
+    });
+
+    document
+      .getElementById("btn-blotter-clear")
+      ?.addEventListener("click", () => {
+        playCommandGo();
+        this.executionBlotter.clearClosedHistory();
+        this.renderExecScreen(container);
+      });
 
     document.getElementById("btn-exec-long")?.addEventListener("click", () => {
       playCommandGo();

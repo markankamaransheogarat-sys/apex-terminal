@@ -12,6 +12,7 @@ export interface LiquidationMagnetCluster {
   tier: "100x" | "50x" | "25x";
   side: "SHORT_LIQ_MAGNET" | "LONG_LIQ_MAGNET"; // SHORT_LIQ_MAGNET = above price (short squeeze), LONG_LIQ_MAGNET = below price (long flush)
   priceLevel: number;
+  hvnAnchorPrice: number; // Real Volume Profile entry node from which this leverage band was projected
   distancePercent: number;
   estimatedPoolUsd: number;
   gravityScore: number; // 0-100 magnetic pull intensity
@@ -22,6 +23,7 @@ export interface LiquidationMagnetMap {
   symbol: string;
   asset: string;
   currentPrice: number;
+  pocPrice: number; // Point of Control (highest volume entry node)
   openInterestUsd: number;
   primaryMagnet: LiquidationMagnetCluster;
   upperShortSqueezePools: LiquidationMagnetCluster[];
@@ -87,17 +89,84 @@ export class QuantExecutionCalculator {
 
   /**
    * Computes the 6 institutional Liquidation Magnet Clusters (100x, 50x, 25x Long & Short)
-   * weighted by live Open Interest and funding rate crowding.
+   * anchored to real historical Volume Profile High-Volume Nodes (HVN) and weighted by
+   * live Open Interest and funding rate crowding.
    */
   public static calculateLiquidationMagnets(
     symbol: string,
     currentPrice: number,
     openInterestUsd: number,
     fundingRate8h: number = 0.0001,
+    candles: Candle[] = [],
   ): LiquidationMagnetMap {
     const asset = symbol.toUpperCase().replace("USDT", "");
     const safePrice = currentPrice > 0 ? currentPrice : 76900;
     const safeOi = openInterestUsd > 0 ? openInterestUsd : 5_000_000_000;
+    const decimals = safePrice < 10 ? 4 : 2;
+
+    // Extract Volume Profile Point of Control (POC) & High-Volume Entry Nodes (HVN)
+    let pocPrice = safePrice;
+    let shortEntryAnchor = safePrice;
+    let longEntryAnchor = safePrice;
+
+    if (candles && candles.length >= 5) {
+      let minP = Infinity;
+      let maxP = -Infinity;
+      for (const c of candles) {
+        if (c.low < minP) minP = c.low;
+        if (c.high > maxP) maxP = c.high;
+      }
+      if (maxP > minP && Number.isFinite(minP)) {
+        const bins = 24;
+        const step = (maxP - minP) / bins;
+        const bucketVol = new Array<number>(bins).fill(0);
+        for (const c of candles) {
+          const typ = (c.high + c.low + c.close) / 3;
+          const idx = Math.min(
+            bins - 1,
+            Math.max(0, Math.floor((typ - minP) / step)),
+          );
+          bucketVol[idx] = (bucketVol[idx] || 0) + (c.volume || 1);
+        }
+
+        let maxVol = -1;
+        let pocIdx = 0;
+        let upperHvnVol = -1;
+        let upperHvnPrice = safePrice;
+        let lowerHvnVol = -1;
+        let lowerHvnPrice = safePrice;
+
+        for (let i = 0; i < bins; i++) {
+          const v = bucketVol[i] || 0;
+          const center = minP + (i + 0.5) * step;
+          if (v > maxVol) {
+            maxVol = v;
+            pocIdx = i;
+          }
+          // Recent short entries clustered near or slightly above current price (within 2.2%)
+          if (
+            center >= safePrice * 0.992 &&
+            center <= safePrice * 1.022 &&
+            v > upperHvnVol
+          ) {
+            upperHvnVol = v;
+            upperHvnPrice = center;
+          }
+          // Recent long entries clustered near or slightly below current price (within 2.2%)
+          if (
+            center <= safePrice * 1.008 &&
+            center >= safePrice * 0.978 &&
+            v > lowerHvnVol
+          ) {
+            lowerHvnVol = v;
+            lowerHvnPrice = center;
+          }
+        }
+        pocPrice = Number((minP + (pocIdx + 0.5) * step).toFixed(decimals));
+        shortEntryAnchor = Number(upperHvnPrice.toFixed(decimals));
+        longEntryAnchor = Number(lowerHvnPrice.toFixed(decimals));
+      }
+    }
 
     // Funding skew: positive funding -> crowded longs -> lower long-flush pools are heavier
     // negative funding -> crowded shorts -> upper short-squeeze pools are heavier
@@ -107,15 +176,26 @@ export class QuantExecutionCalculator {
 
     const basePool = safeOi * 0.0045; // ~0.45% of total OI clustered per key leverage band
 
+    const s100Price = Number(
+      Math.max(safePrice * 1.006, shortEntryAnchor * 1.0095).toFixed(decimals),
+    );
+    const s50Price = Number(
+      Math.max(safePrice * 1.014, shortEntryAnchor * 1.0192).toFixed(decimals),
+    );
+    const s25Price = Number(
+      Math.max(safePrice * 1.028, shortEntryAnchor * 1.0385).toFixed(decimals),
+    );
+
     const upperShortSqueezePools: LiquidationMagnetCluster[] = [
       {
         id: `${asset}-S100`,
         tier: "100x",
         side: "SHORT_LIQ_MAGNET",
-        priceLevel: Number(
-          (safePrice * 1.0095).toFixed(safePrice < 10 ? 4 : 2),
+        priceLevel: s100Price,
+        hvnAnchorPrice: shortEntryAnchor,
+        distancePercent: Number(
+          (((s100Price - safePrice) / safePrice) * 100).toFixed(2),
         ),
-        distancePercent: 0.95,
         estimatedPoolUsd: Math.round(basePool * 0.65 * shortPoolMult),
         gravityScore: Math.round(78 * shortPoolMult),
         isPrimaryMagnet: false,
@@ -124,10 +204,11 @@ export class QuantExecutionCalculator {
         id: `${asset}-S50`,
         tier: "50x",
         side: "SHORT_LIQ_MAGNET",
-        priceLevel: Number(
-          (safePrice * 1.0192).toFixed(safePrice < 10 ? 4 : 2),
+        priceLevel: s50Price,
+        hvnAnchorPrice: shortEntryAnchor,
+        distancePercent: Number(
+          (((s50Price - safePrice) / safePrice) * 100).toFixed(2),
         ),
-        distancePercent: 1.92,
         estimatedPoolUsd: Math.round(basePool * 1.35 * shortPoolMult),
         gravityScore: Math.round(92 * shortPoolMult),
         isPrimaryMagnet: false,
@@ -136,25 +217,37 @@ export class QuantExecutionCalculator {
         id: `${asset}-S25`,
         tier: "25x",
         side: "SHORT_LIQ_MAGNET",
-        priceLevel: Number(
-          (safePrice * 1.0385).toFixed(safePrice < 10 ? 4 : 2),
+        priceLevel: s25Price,
+        hvnAnchorPrice: shortEntryAnchor,
+        distancePercent: Number(
+          (((s25Price - safePrice) / safePrice) * 100).toFixed(2),
         ),
-        distancePercent: 3.85,
         estimatedPoolUsd: Math.round(basePool * 1.85 * shortPoolMult),
         gravityScore: Math.round(74 * shortPoolMult),
         isPrimaryMagnet: false,
       },
     ];
 
+    const l100Price = Number(
+      Math.min(safePrice * 0.994, longEntryAnchor * 0.9905).toFixed(decimals),
+    );
+    const l50Price = Number(
+      Math.min(safePrice * 0.986, longEntryAnchor * 0.9808).toFixed(decimals),
+    );
+    const l25Price = Number(
+      Math.min(safePrice * 0.972, longEntryAnchor * 0.9615).toFixed(decimals),
+    );
+
     const lowerLongFlushPools: LiquidationMagnetCluster[] = [
       {
         id: `${asset}-L100`,
         tier: "100x",
         side: "LONG_LIQ_MAGNET",
-        priceLevel: Number(
-          (safePrice * 0.9905).toFixed(safePrice < 10 ? 4 : 2),
+        priceLevel: l100Price,
+        hvnAnchorPrice: longEntryAnchor,
+        distancePercent: Number(
+          (((l100Price - safePrice) / safePrice) * 100).toFixed(2),
         ),
-        distancePercent: -0.95,
         estimatedPoolUsd: Math.round(basePool * 0.7 * longPoolMult),
         gravityScore: Math.round(80 * longPoolMult),
         isPrimaryMagnet: false,
@@ -163,10 +256,11 @@ export class QuantExecutionCalculator {
         id: `${asset}-L50`,
         tier: "50x",
         side: "LONG_LIQ_MAGNET",
-        priceLevel: Number(
-          (safePrice * 0.9808).toFixed(safePrice < 10 ? 4 : 2),
+        priceLevel: l50Price,
+        hvnAnchorPrice: longEntryAnchor,
+        distancePercent: Number(
+          (((l50Price - safePrice) / safePrice) * 100).toFixed(2),
         ),
-        distancePercent: -1.92,
         estimatedPoolUsd: Math.round(basePool * 1.42 * longPoolMult),
         gravityScore: Math.round(94 * longPoolMult),
         isPrimaryMagnet: false,
@@ -175,10 +269,11 @@ export class QuantExecutionCalculator {
         id: `${asset}-L25`,
         tier: "25x",
         side: "LONG_LIQ_MAGNET",
-        priceLevel: Number(
-          (safePrice * 0.9615).toFixed(safePrice < 10 ? 4 : 2),
+        priceLevel: l25Price,
+        hvnAnchorPrice: longEntryAnchor,
+        distancePercent: Number(
+          (((l25Price - safePrice) / safePrice) * 100).toFixed(2),
         ),
-        distancePercent: -3.85,
         estimatedPoolUsd: Math.round(basePool * 1.95 * longPoolMult),
         gravityScore: Math.round(76 * longPoolMult),
         isPrimaryMagnet: false,
@@ -199,6 +294,7 @@ export class QuantExecutionCalculator {
       symbol: symbol.toUpperCase(),
       asset,
       currentPrice: safePrice,
+      pocPrice,
       openInterestUsd: safeOi,
       primaryMagnet,
       upperShortSqueezePools,

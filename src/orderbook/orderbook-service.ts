@@ -57,10 +57,34 @@ export interface L2OrderbookSnapshot {
   asks: OrderbookLevel[];
 }
 
+export interface MultiAssetWallSummary {
+  symbol: string;
+  asset: string;
+  midPrice: number;
+  microPriceSkewBps: number;
+  obi20Percent: number;
+  dominantWallSide: "BID_WALL" | "ASK_WALL";
+  dominantWallPrice: number;
+  dominantWallUsd: number;
+  dominantWallMultiple: number;
+  regime: L2OrderbookSnapshot["regime"];
+}
+
 export class OrderbookService {
+  private static readonly RADAR_SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "SUIUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+  ];
+
   private symbol: string = "BTCUSDT";
   private ws: WebSocket | null = null;
   private snapshot: L2OrderbookSnapshot | null = null;
+  private multiSnapshots: Map<string, L2OrderbookSnapshot> = new Map();
   private listeners: Array<(snap: L2OrderbookSnapshot) => void> = [];
   private isDestroyed = false;
 
@@ -82,6 +106,70 @@ export class OrderbookService {
     return this.snapshot;
   }
 
+  public getSnapshotForSymbol(sym: string): L2OrderbookSnapshot | null {
+    const clean = sym.toUpperCase();
+    if (clean === this.symbol && this.snapshot) return this.snapshot;
+    return this.multiSnapshots.get(clean) || null;
+  }
+
+  public getMultiAssetWalls(): MultiAssetWallSummary[] {
+    const list: MultiAssetWallSummary[] = [];
+    for (const sym of OrderbookService.RADAR_SYMBOLS) {
+      const snap =
+        sym === this.symbol && this.snapshot
+          ? this.snapshot
+          : this.multiSnapshots.get(sym);
+      if (!snap) continue;
+      const bidW = snap.biggestBidWall;
+      const askW = snap.biggestAskWall;
+      const isBidBigger = (bidW?.notionalUsd || 0) >= (askW?.notionalUsd || 0);
+      const dom = isBidBigger ? bidW : askW;
+      if (!dom) continue;
+
+      list.push({
+        symbol: snap.symbol,
+        asset: snap.asset,
+        midPrice: snap.midPrice,
+        microPriceSkewBps: snap.microPriceSkewBps,
+        obi20Percent: snap.obi20Percent,
+        dominantWallSide: isBidBigger ? "BID_WALL" : "ASK_WALL",
+        dominantWallPrice: dom.price,
+        dominantWallUsd: dom.notionalUsd,
+        dominantWallMultiple: dom.wallMultiple,
+        regime: snap.regime,
+      });
+    }
+    return list.sort((a, b) => b.dominantWallMultiple - a.dominantWallMultiple);
+  }
+
+  public async scanMultiAssetWalls(): Promise<MultiAssetWallSummary[]> {
+    if (typeof fetch === "undefined") return this.getMultiAssetWalls();
+    await Promise.all(
+      OrderbookService.RADAR_SYMBOLS.map(async (sym) => {
+        try {
+          const res = await fetch(
+            `https://api.binance.com/api/v3/depth?symbol=${sym}&limit=20`,
+          );
+          if (res.ok) {
+            const data = await res.json();
+            if (Array.isArray(data.bids) && Array.isArray(data.asks)) {
+              const snap = OrderbookService.computeL2Analytics(
+                sym,
+                data.bids,
+                data.asks,
+              );
+              this.multiSnapshots.set(sym, snap);
+              if (sym === this.symbol && !this.snapshot) {
+                this.snapshot = snap;
+              }
+            }
+          }
+        } catch {}
+      }),
+    );
+    return this.getMultiAssetWalls();
+  }
+
   public onSnapshot(fn: (snap: L2OrderbookSnapshot) => void): () => void {
     this.listeners.push(fn);
     return () => {
@@ -101,6 +189,7 @@ export class OrderbookService {
 
   public async start(): Promise<void> {
     await this.fetchRestDepth();
+    this.scanMultiAssetWalls().catch(() => {});
     this.connectWs();
   }
 
@@ -131,6 +220,7 @@ export class OrderbookService {
             raw.asks,
           );
           this.snapshot = snap;
+          this.multiSnapshots.set(this.symbol, snap);
           this.notify(snap);
           return snap;
         }
@@ -159,6 +249,7 @@ export class OrderbookService {
               asks,
             );
             this.snapshot = snap;
+            this.multiSnapshots.set(this.symbol, snap);
             this.notify(snap);
           }
         } catch {}

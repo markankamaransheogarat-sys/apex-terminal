@@ -22,22 +22,37 @@ describe("QuantExecutionCalculator", () => {
     assert.equal(atr, 1000);
   });
 
-  it("maps 25x, 50x, and 100x Liquidation Magnet pools weighted by Open Interest and funding skew", () => {
+  it("maps 25x, 50x, and 100x Liquidation Magnet pools anchored to Volume Profile HVN nodes", () => {
+    const candles: Candle[] = [];
+    for (let i = 0; i < 15; i++) {
+      candles.push({
+        timestamp: 1700000000000 + i * 3600000,
+        open: 84800,
+        high: 85400,
+        low: 84400,
+        close: 84900,
+        volume: i === 7 ? 25000 : 800, // High Volume Node (POC) around ~84,900
+      });
+    }
+
     const snap = QuantExecutionCalculator.calculateLiquidationMagnets(
       "BTCUSDT",
       85000,
       6000000000,
       0.0003, // High positive funding -> crowded longs -> long liquidation pools larger
+      candles,
     );
 
     assert.equal(snap.upperShortSqueezePools.length, 3);
     assert.equal(snap.lowerLongFlushPools.length, 3);
+    assert.ok(snap.pocPrice > 84400 && snap.pocPrice < 85400);
     const long50x = snap.lowerLongFlushPools.find((z) => z.tier === "50x");
     const short50x = snap.upperShortSqueezePools.find((z) => z.tier === "50x");
     assert.ok(long50x);
     assert.ok(short50x);
     assert.ok(long50x.priceLevel < 85000);
     assert.ok(short50x.priceLevel > 85000);
+    assert.ok(long50x.hvnAnchorPrice > 0);
     // Because funding is strongly positive (+0.03%), crowded long pool should exceed short pool
     assert.ok(long50x.estimatedPoolUsd > short50x.estimatedPoolUsd);
   });

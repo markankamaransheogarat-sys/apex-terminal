@@ -4825,9 +4825,19 @@ var OrderbookService = class _OrderbookService {
     this.symbol = initialSymbol.toUpperCase();
   }
   WebSocketClass;
+  static RADAR_SYMBOLS = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "SUIUSDT",
+    "XRPUSDT",
+    "DOGEUSDT"
+  ];
   symbol = "BTCUSDT";
   ws = null;
   snapshot = null;
+  multiSnapshots = /* @__PURE__ */ new Map();
   listeners = [];
   isDestroyed = false;
   getSymbol() {
@@ -4835,6 +4845,64 @@ var OrderbookService = class _OrderbookService {
   }
   getSnapshot() {
     return this.snapshot;
+  }
+  getSnapshotForSymbol(sym) {
+    const clean = sym.toUpperCase();
+    if (clean === this.symbol && this.snapshot) return this.snapshot;
+    return this.multiSnapshots.get(clean) || null;
+  }
+  getMultiAssetWalls() {
+    const list = [];
+    for (const sym of _OrderbookService.RADAR_SYMBOLS) {
+      const snap = sym === this.symbol && this.snapshot ? this.snapshot : this.multiSnapshots.get(sym);
+      if (!snap) continue;
+      const bidW = snap.biggestBidWall;
+      const askW = snap.biggestAskWall;
+      const isBidBigger = (bidW?.notionalUsd || 0) >= (askW?.notionalUsd || 0);
+      const dom = isBidBigger ? bidW : askW;
+      if (!dom) continue;
+      list.push({
+        symbol: snap.symbol,
+        asset: snap.asset,
+        midPrice: snap.midPrice,
+        microPriceSkewBps: snap.microPriceSkewBps,
+        obi20Percent: snap.obi20Percent,
+        dominantWallSide: isBidBigger ? "BID_WALL" : "ASK_WALL",
+        dominantWallPrice: dom.price,
+        dominantWallUsd: dom.notionalUsd,
+        dominantWallMultiple: dom.wallMultiple,
+        regime: snap.regime
+      });
+    }
+    return list.sort((a, b) => b.dominantWallMultiple - a.dominantWallMultiple);
+  }
+  async scanMultiAssetWalls() {
+    if (typeof fetch === "undefined") return this.getMultiAssetWalls();
+    await Promise.all(
+      _OrderbookService.RADAR_SYMBOLS.map(async (sym) => {
+        try {
+          const res = await fetch(
+            `https://api.binance.com/api/v3/depth?symbol=${sym}&limit=20`
+          );
+          if (res.ok) {
+            const data = await res.json();
+            if (Array.isArray(data.bids) && Array.isArray(data.asks)) {
+              const snap = _OrderbookService.computeL2Analytics(
+                sym,
+                data.bids,
+                data.asks
+              );
+              this.multiSnapshots.set(sym, snap);
+              if (sym === this.symbol && !this.snapshot) {
+                this.snapshot = snap;
+              }
+            }
+          }
+        } catch {
+        }
+      })
+    );
+    return this.getMultiAssetWalls();
   }
   onSnapshot(fn) {
     this.listeners.push(fn);
@@ -4853,6 +4921,8 @@ var OrderbookService = class _OrderbookService {
   }
   async start() {
     await this.fetchRestDepth();
+    this.scanMultiAssetWalls().catch(() => {
+    });
     this.connectWs();
   }
   stop() {
@@ -4881,6 +4951,7 @@ var OrderbookService = class _OrderbookService {
             raw.asks
           );
           this.snapshot = snap;
+          this.multiSnapshots.set(this.symbol, snap);
           this.notify(snap);
           return snap;
         }
@@ -4908,6 +4979,7 @@ var OrderbookService = class _OrderbookService {
               asks
             );
             this.snapshot = snap;
+            this.multiSnapshots.set(this.symbol, snap);
             this.notify(snap);
           }
         } catch {
@@ -5548,25 +5620,86 @@ var QuantExecutionCalculator = class _QuantExecutionCalculator {
   }
   /**
    * Computes the 6 institutional Liquidation Magnet Clusters (100x, 50x, 25x Long & Short)
-   * weighted by live Open Interest and funding rate crowding.
+   * anchored to real historical Volume Profile High-Volume Nodes (HVN) and weighted by
+   * live Open Interest and funding rate crowding.
    */
-  static calculateLiquidationMagnets(symbol, currentPrice, openInterestUsd, fundingRate8h = 1e-4) {
+  static calculateLiquidationMagnets(symbol, currentPrice, openInterestUsd, fundingRate8h = 1e-4, candles = []) {
     const asset = symbol.toUpperCase().replace("USDT", "");
     const safePrice = currentPrice > 0 ? currentPrice : 76900;
     const safeOi = openInterestUsd > 0 ? openInterestUsd : 5e9;
+    const decimals = safePrice < 10 ? 4 : 2;
+    let pocPrice = safePrice;
+    let shortEntryAnchor = safePrice;
+    let longEntryAnchor = safePrice;
+    if (candles && candles.length >= 5) {
+      let minP = Infinity;
+      let maxP = -Infinity;
+      for (const c of candles) {
+        if (c.low < minP) minP = c.low;
+        if (c.high > maxP) maxP = c.high;
+      }
+      if (maxP > minP && Number.isFinite(minP)) {
+        const bins = 24;
+        const step = (maxP - minP) / bins;
+        const bucketVol = new Array(bins).fill(0);
+        for (const c of candles) {
+          const typ = (c.high + c.low + c.close) / 3;
+          const idx = Math.min(
+            bins - 1,
+            Math.max(0, Math.floor((typ - minP) / step))
+          );
+          bucketVol[idx] = (bucketVol[idx] || 0) + (c.volume || 1);
+        }
+        let maxVol = -1;
+        let pocIdx = 0;
+        let upperHvnVol = -1;
+        let upperHvnPrice = safePrice;
+        let lowerHvnVol = -1;
+        let lowerHvnPrice = safePrice;
+        for (let i = 0; i < bins; i++) {
+          const v = bucketVol[i] || 0;
+          const center = minP + (i + 0.5) * step;
+          if (v > maxVol) {
+            maxVol = v;
+            pocIdx = i;
+          }
+          if (center >= safePrice * 0.992 && center <= safePrice * 1.022 && v > upperHvnVol) {
+            upperHvnVol = v;
+            upperHvnPrice = center;
+          }
+          if (center <= safePrice * 1.008 && center >= safePrice * 0.978 && v > lowerHvnVol) {
+            lowerHvnVol = v;
+            lowerHvnPrice = center;
+          }
+        }
+        pocPrice = Number((minP + (pocIdx + 0.5) * step).toFixed(decimals));
+        shortEntryAnchor = Number(upperHvnPrice.toFixed(decimals));
+        longEntryAnchor = Number(lowerHvnPrice.toFixed(decimals));
+      }
+    }
     const fundingBias = Math.max(-0.35, Math.min(0.35, fundingRate8h * 1200));
     const longPoolMult = 1 + fundingBias;
     const shortPoolMult = 1 - fundingBias;
     const basePool = safeOi * 45e-4;
+    const s100Price = Number(
+      Math.max(safePrice * 1.006, shortEntryAnchor * 1.0095).toFixed(decimals)
+    );
+    const s50Price = Number(
+      Math.max(safePrice * 1.014, shortEntryAnchor * 1.0192).toFixed(decimals)
+    );
+    const s25Price = Number(
+      Math.max(safePrice * 1.028, shortEntryAnchor * 1.0385).toFixed(decimals)
+    );
     const upperShortSqueezePools = [
       {
         id: `${asset}-S100`,
         tier: "100x",
         side: "SHORT_LIQ_MAGNET",
-        priceLevel: Number(
-          (safePrice * 1.0095).toFixed(safePrice < 10 ? 4 : 2)
+        priceLevel: s100Price,
+        hvnAnchorPrice: shortEntryAnchor,
+        distancePercent: Number(
+          ((s100Price - safePrice) / safePrice * 100).toFixed(2)
         ),
-        distancePercent: 0.95,
         estimatedPoolUsd: Math.round(basePool * 0.65 * shortPoolMult),
         gravityScore: Math.round(78 * shortPoolMult),
         isPrimaryMagnet: false
@@ -5575,10 +5708,11 @@ var QuantExecutionCalculator = class _QuantExecutionCalculator {
         id: `${asset}-S50`,
         tier: "50x",
         side: "SHORT_LIQ_MAGNET",
-        priceLevel: Number(
-          (safePrice * 1.0192).toFixed(safePrice < 10 ? 4 : 2)
+        priceLevel: s50Price,
+        hvnAnchorPrice: shortEntryAnchor,
+        distancePercent: Number(
+          ((s50Price - safePrice) / safePrice * 100).toFixed(2)
         ),
-        distancePercent: 1.92,
         estimatedPoolUsd: Math.round(basePool * 1.35 * shortPoolMult),
         gravityScore: Math.round(92 * shortPoolMult),
         isPrimaryMagnet: false
@@ -5587,24 +5721,35 @@ var QuantExecutionCalculator = class _QuantExecutionCalculator {
         id: `${asset}-S25`,
         tier: "25x",
         side: "SHORT_LIQ_MAGNET",
-        priceLevel: Number(
-          (safePrice * 1.0385).toFixed(safePrice < 10 ? 4 : 2)
+        priceLevel: s25Price,
+        hvnAnchorPrice: shortEntryAnchor,
+        distancePercent: Number(
+          ((s25Price - safePrice) / safePrice * 100).toFixed(2)
         ),
-        distancePercent: 3.85,
         estimatedPoolUsd: Math.round(basePool * 1.85 * shortPoolMult),
         gravityScore: Math.round(74 * shortPoolMult),
         isPrimaryMagnet: false
       }
     ];
+    const l100Price = Number(
+      Math.min(safePrice * 0.994, longEntryAnchor * 0.9905).toFixed(decimals)
+    );
+    const l50Price = Number(
+      Math.min(safePrice * 0.986, longEntryAnchor * 0.9808).toFixed(decimals)
+    );
+    const l25Price = Number(
+      Math.min(safePrice * 0.972, longEntryAnchor * 0.9615).toFixed(decimals)
+    );
     const lowerLongFlushPools = [
       {
         id: `${asset}-L100`,
         tier: "100x",
         side: "LONG_LIQ_MAGNET",
-        priceLevel: Number(
-          (safePrice * 0.9905).toFixed(safePrice < 10 ? 4 : 2)
+        priceLevel: l100Price,
+        hvnAnchorPrice: longEntryAnchor,
+        distancePercent: Number(
+          ((l100Price - safePrice) / safePrice * 100).toFixed(2)
         ),
-        distancePercent: -0.95,
         estimatedPoolUsd: Math.round(basePool * 0.7 * longPoolMult),
         gravityScore: Math.round(80 * longPoolMult),
         isPrimaryMagnet: false
@@ -5613,10 +5758,11 @@ var QuantExecutionCalculator = class _QuantExecutionCalculator {
         id: `${asset}-L50`,
         tier: "50x",
         side: "LONG_LIQ_MAGNET",
-        priceLevel: Number(
-          (safePrice * 0.9808).toFixed(safePrice < 10 ? 4 : 2)
+        priceLevel: l50Price,
+        hvnAnchorPrice: longEntryAnchor,
+        distancePercent: Number(
+          ((l50Price - safePrice) / safePrice * 100).toFixed(2)
         ),
-        distancePercent: -1.92,
         estimatedPoolUsd: Math.round(basePool * 1.42 * longPoolMult),
         gravityScore: Math.round(94 * longPoolMult),
         isPrimaryMagnet: false
@@ -5625,10 +5771,11 @@ var QuantExecutionCalculator = class _QuantExecutionCalculator {
         id: `${asset}-L25`,
         tier: "25x",
         side: "LONG_LIQ_MAGNET",
-        priceLevel: Number(
-          (safePrice * 0.9615).toFixed(safePrice < 10 ? 4 : 2)
+        priceLevel: l25Price,
+        hvnAnchorPrice: longEntryAnchor,
+        distancePercent: Number(
+          ((l25Price - safePrice) / safePrice * 100).toFixed(2)
         ),
-        distancePercent: -3.85,
         estimatedPoolUsd: Math.round(basePool * 1.95 * longPoolMult),
         gravityScore: Math.round(76 * longPoolMult),
         isPrimaryMagnet: false
@@ -5646,6 +5793,7 @@ var QuantExecutionCalculator = class _QuantExecutionCalculator {
       symbol: symbol.toUpperCase(),
       asset,
       currentPrice: safePrice,
+      pocPrice,
       openInterestUsd: safeOi,
       primaryMagnet,
       upperShortSqueezePools,
@@ -5759,6 +5907,235 @@ var QuantExecutionCalculator = class _QuantExecutionCalculator {
   }
 };
 
+// src/execution/execution-blotter.ts
+var ExecutionBlotterService = class _ExecutionBlotterService {
+  static STORAGE_KEY = "apex_execution_blotter_v1";
+  positions = [];
+  constructor() {
+    this.loadFromStorage();
+  }
+  /**
+   * Opens a live tracked position directly from a QuantTradeSetup ticket in 1 click.
+   */
+  openPositionFromSetup(setup) {
+    const pos = {
+      id: `EX-${Date.now()}-${Math.floor(Math.random() * 900 + 100)}`,
+      symbol: setup.symbol,
+      asset: setup.asset,
+      direction: setup.direction,
+      entryPrice: setup.optimalEntryPrice,
+      currentPrice: setup.currentPrice,
+      stopLossPrice: setup.protectedStopLoss,
+      initialStopLossPrice: setup.protectedStopLoss,
+      tp1Price: setup.takeProfit1_15R,
+      tp2Price: setup.takeProfit2_25R,
+      tp3MagnetPrice: setup.takeProfit3_Magnet,
+      initialSizeCoins: setup.positionSizeCoins,
+      remainingSizeCoins: setup.positionSizeCoins,
+      notionalUsd: setup.positionNotionalUsd,
+      leverage: setup.recommendedLeverage,
+      riskBudgetUsd: Math.max(1, setup.maxRiskDollarUsd),
+      realizedPnlUsd: 0,
+      unrealizedPnlUsd: 0,
+      totalPnlUsd: 0,
+      currentRMultiple: 0,
+      tp1Hit: false,
+      tp2Hit: false,
+      tp3Hit: false,
+      isBreakevenStop: false,
+      status: "OPEN",
+      openedAt: Date.now()
+    };
+    this.positions.unshift(pos);
+    if (this.positions.length > 60) {
+      this.positions = this.positions.slice(0, 60);
+    }
+    this.saveToStorage();
+    return pos;
+  }
+  /**
+   * Marks all open positions to live prices and processes automatic SL / TP1 / TP2 / TP3 ladder fills.
+   */
+  updateWithLivePrices(livePrices) {
+    let changed = false;
+    for (const pos of this.positions) {
+      if (pos.status !== "OPEN") continue;
+      const live = livePrices.get(pos.symbol);
+      if (!live || live <= 0) continue;
+      pos.currentPrice = live;
+      const dirSign = pos.direction === "LONG" ? 1 : -1;
+      const stopTriggered = pos.direction === "LONG" && live <= pos.stopLossPrice || pos.direction === "SHORT" && live >= pos.stopLossPrice;
+      if (stopTriggered && pos.remainingSizeCoins > 0) {
+        const fillPnl = (pos.stopLossPrice - pos.entryPrice) * dirSign * pos.remainingSizeCoins;
+        pos.realizedPnlUsd = Number((pos.realizedPnlUsd + fillPnl).toFixed(2));
+        pos.remainingSizeCoins = 0;
+        pos.unrealizedPnlUsd = 0;
+        pos.totalPnlUsd = pos.realizedPnlUsd;
+        pos.currentRMultiple = Number(
+          (pos.totalPnlUsd / pos.riskBudgetUsd).toFixed(2)
+        );
+        pos.status = pos.isBreakevenStop ? "CLOSED_TP" : "CLOSED_SL";
+        pos.closedAt = Date.now();
+        pos.closeNote = pos.isBreakevenStop ? "Closed at Breakeven Stop after TP1+" : "Stopped out at Wall-Protected Stop (-1.0R)";
+        changed = true;
+        continue;
+      }
+      const tp1Triggered = !pos.tp1Hit && (pos.direction === "LONG" && live >= pos.tp1Price || pos.direction === "SHORT" && live <= pos.tp1Price);
+      if (tp1Triggered && pos.remainingSizeCoins > 0) {
+        const clipCoins = Math.min(
+          pos.remainingSizeCoins,
+          Number((pos.initialSizeCoins * 0.35).toFixed(4))
+        );
+        const clipPnl = (pos.tp1Price - pos.entryPrice) * dirSign * clipCoins;
+        pos.realizedPnlUsd = Number((pos.realizedPnlUsd + clipPnl).toFixed(2));
+        pos.remainingSizeCoins = Number(
+          Math.max(0, pos.remainingSizeCoins - clipCoins).toFixed(4)
+        );
+        pos.tp1Hit = true;
+        pos.stopLossPrice = pos.entryPrice;
+        pos.isBreakevenStop = true;
+        changed = true;
+      }
+      const tp2Triggered = !pos.tp2Hit && (pos.direction === "LONG" && live >= pos.tp2Price || pos.direction === "SHORT" && live <= pos.tp2Price);
+      if (tp2Triggered && pos.remainingSizeCoins > 0) {
+        const clipCoins = Math.min(
+          pos.remainingSizeCoins,
+          Number((pos.initialSizeCoins * 0.35).toFixed(4))
+        );
+        const clipPnl = (pos.tp2Price - pos.entryPrice) * dirSign * clipCoins;
+        pos.realizedPnlUsd = Number((pos.realizedPnlUsd + clipPnl).toFixed(2));
+        pos.remainingSizeCoins = Number(
+          Math.max(0, pos.remainingSizeCoins - clipCoins).toFixed(4)
+        );
+        pos.tp2Hit = true;
+        changed = true;
+      }
+      const tp3Triggered = !pos.tp3Hit && (pos.direction === "LONG" && live >= pos.tp3MagnetPrice || pos.direction === "SHORT" && live <= pos.tp3MagnetPrice);
+      if (tp3Triggered && pos.remainingSizeCoins > 0) {
+        const runnerPnl = (pos.tp3MagnetPrice - pos.entryPrice) * dirSign * pos.remainingSizeCoins;
+        pos.realizedPnlUsd = Number(
+          (pos.realizedPnlUsd + runnerPnl).toFixed(2)
+        );
+        pos.remainingSizeCoins = 0;
+        pos.unrealizedPnlUsd = 0;
+        pos.totalPnlUsd = pos.realizedPnlUsd;
+        pos.currentRMultiple = Number(
+          (pos.totalPnlUsd / pos.riskBudgetUsd).toFixed(2)
+        );
+        pos.tp3Hit = true;
+        pos.status = "CLOSED_TP";
+        pos.closedAt = Date.now();
+        pos.closeNote = "Full target hit at TP3 (50x Liquidation Magnet)";
+        changed = true;
+        continue;
+      }
+      pos.unrealizedPnlUsd = Number(
+        ((live - pos.entryPrice) * dirSign * pos.remainingSizeCoins).toFixed(2)
+      );
+      pos.totalPnlUsd = Number(
+        (pos.realizedPnlUsd + pos.unrealizedPnlUsd).toFixed(2)
+      );
+      pos.currentRMultiple = Number(
+        (pos.totalPnlUsd / pos.riskBudgetUsd).toFixed(2)
+      );
+    }
+    if (changed) {
+      this.saveToStorage();
+    }
+  }
+  /**
+   * Moves the Stop-Loss of an open position to exact entry price (Breakeven).
+   */
+  moveStopToBreakeven(id) {
+    const pos = this.positions.find((p) => p.id === id && p.status === "OPEN");
+    if (!pos) return false;
+    pos.stopLossPrice = pos.entryPrice;
+    pos.isBreakevenStop = true;
+    this.saveToStorage();
+    return true;
+  }
+  /**
+   * Manually closes an open position at the current live market price.
+   */
+  closePositionAtMarket(id, explicitExitPrice) {
+    const pos = this.positions.find((p) => p.id === id && p.status === "OPEN");
+    if (!pos) return false;
+    const exitPrice = explicitExitPrice && explicitExitPrice > 0 ? explicitExitPrice : pos.currentPrice;
+    const dirSign = pos.direction === "LONG" ? 1 : -1;
+    const closePnl = (exitPrice - pos.entryPrice) * dirSign * pos.remainingSizeCoins;
+    pos.currentPrice = exitPrice;
+    pos.realizedPnlUsd = Number((pos.realizedPnlUsd + closePnl).toFixed(2));
+    pos.remainingSizeCoins = 0;
+    pos.unrealizedPnlUsd = 0;
+    pos.totalPnlUsd = pos.realizedPnlUsd;
+    pos.currentRMultiple = Number(
+      (pos.totalPnlUsd / pos.riskBudgetUsd).toFixed(2)
+    );
+    pos.status = "CLOSED_MANUAL";
+    pos.closedAt = Date.now();
+    pos.closeNote = `Closed manually at $${exitPrice.toLocaleString()}`;
+    this.saveToStorage();
+    return true;
+  }
+  clearClosedHistory() {
+    this.positions = this.positions.filter((p) => p.status === "OPEN");
+    this.saveToStorage();
+  }
+  getSummary() {
+    const openPositions = this.positions.filter((p) => p.status === "OPEN");
+    const closedPositions = this.positions.filter((p) => p.status !== "OPEN");
+    let totalUnrealizedPnlUsd = 0;
+    let totalRealizedPnlUsd = 0;
+    for (const p of openPositions) {
+      totalUnrealizedPnlUsd += p.unrealizedPnlUsd;
+      totalRealizedPnlUsd += p.realizedPnlUsd;
+    }
+    for (const p of closedPositions) {
+      totalRealizedPnlUsd += p.realizedPnlUsd;
+    }
+    const evaluated = [...openPositions, ...closedPositions];
+    const winners = evaluated.filter((p) => p.totalPnlUsd > 0).length;
+    const winRatePercent = evaluated.length > 0 ? Number((winners / evaluated.length * 100).toFixed(1)) : 0;
+    const avgRMultiple = evaluated.length > 0 ? Number(
+      (evaluated.reduce((acc, p) => acc + p.currentRMultiple, 0) / evaluated.length).toFixed(2)
+    ) : 0;
+    return {
+      openPositions,
+      closedPositions,
+      totalUnrealizedPnlUsd: Number(totalUnrealizedPnlUsd.toFixed(2)),
+      totalRealizedPnlUsd: Number(totalRealizedPnlUsd.toFixed(2)),
+      netTotalPnlUsd: Number(
+        (totalUnrealizedPnlUsd + totalRealizedPnlUsd).toFixed(2)
+      ),
+      winRatePercent,
+      avgRMultiple
+    };
+  }
+  loadFromStorage() {
+    if (typeof localStorage === "undefined") return;
+    try {
+      const raw = localStorage.getItem(_ExecutionBlotterService.STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          this.positions = parsed;
+        }
+      }
+    } catch {
+    }
+  }
+  saveToStorage() {
+    if (typeof localStorage === "undefined") return;
+    try {
+      localStorage.setItem(
+        _ExecutionBlotterService.STORAGE_KEY,
+        JSON.stringify(this.positions)
+      );
+    } catch {
+    }
+  }
+};
+
 // src/web/app.ts
 var ApexWebTerminal = class {
   binanceWs;
@@ -5772,6 +6149,7 @@ var ApexWebTerminal = class {
   orderbookService;
   alphaTracker;
   derivService;
+  executionBlotter;
   newsService;
   newsSnapshot = null;
   newsFilter = "ALL";
@@ -5807,6 +6185,7 @@ var ApexWebTerminal = class {
     );
     this.alphaTracker = new AlphaPerformanceTracker();
     this.derivService = new DerivativesIntelligenceService();
+    this.executionBlotter = new ExecutionBlotterService();
     this.newsService = NewsService.getInstance();
     this.alertManager = AlertManager.getInstance();
     if (typeof localStorage !== "undefined") {
@@ -6076,6 +6455,7 @@ var ApexWebTerminal = class {
       else if (isDown) playTickerTick(false);
       this.prevPrices.set(ticker.symbol, ticker.price);
       this.tickers.set(ticker.symbol, ticker);
+      this.executionBlotter.updateWithLivePrices(this.prevPrices);
       if (ticker.symbol === this.chartService.getSymbol()) {
         this.chartService.updateWithLiveTick(ticker.price, ticker.volume24h);
       }
@@ -6157,6 +6537,8 @@ var ApexWebTerminal = class {
       this.newsService.fetchLatestNews().then((s) => this.newsSnapshot = s);
       this.derivService.fetchLiveDeribitOptions().then(() => {
         if (this.activeScreen === "DERIV") this.render();
+      });
+      this.orderbookService.scanMultiAssetWalls().catch(() => {
       });
     }, 45e3);
   }
@@ -6498,12 +6880,13 @@ var ApexWebTerminal = class {
     const skewClass = snap.microPriceSkewBps >= 0 ? "text-green" : "text-red";
     const obiSign = snap.obi20Percent >= 0 ? "+" : "";
     const obiClass = snap.obi20Percent >= 0 ? "text-green" : "text-red";
+    const multiWalls = this.orderbookService.getMultiAssetWalls();
     container.innerHTML = `
       <div class="terminal-screen screen-book">
         <div class="screen-header">
           <div class="screen-title-group">
             <h2 class="screen-title">\u{1F9F1} L2 ORDERBOOK DEPTH, STOIKOV MICRO-PRICE &amp; INSTITUTIONAL LIQUIDITY WALLS</h2>
-            <span class="screen-subtitle">BINANCE @DEPTH20@100MS \xB7 STOIKOV (2018) FAIR MICRO-PRICE \xB7 LIMIT WALL DETECTOR (&ge;2.2X MEAN DEPTH)</span>
+            <span class="screen-subtitle">BINANCE @DEPTH20@100MS \xB7 STOIKOV (2018) FAIR MICRO-PRICE \xB7 MULTI-ASSET LIMIT WALL RADAR (&ge;2.2X MEAN DEPTH)</span>
           </div>
           <div class="filter-group">
             ${symbols.map(
@@ -6515,6 +6898,24 @@ var ApexWebTerminal = class {
     ).join("")}
           </div>
         </div>
+
+        ${multiWalls.length > 0 ? `
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 10px 12px; align-items: center;">
+            <span style="font-size: 10px; font-weight: 700; color: var(--amber-bright); letter-spacing: 0.08em;">\u{1F6F0}\uFE0F MULTI-ASSET L2 WALL RADAR (CLICK TO FOCUS):</span>
+            ${multiWalls.map((mw) => {
+      const isBid = mw.dominantWallSide === "BID_WALL";
+      const priceFmt = mw.dominantWallPrice < 10 ? `$${mw.dominantWallPrice.toFixed(4)}` : `$${mw.dominantWallPrice.toLocaleString(void 0, { maximumFractionDigits: 2 })}`;
+      return `
+                  <button class="terminal-btn-sm" data-book-sym="${mw.symbol}" style="${mw.symbol === curSymbol ? "border-color: var(--amber-bright);" : ""}">
+                    <strong>${mw.asset}</strong>
+                    <span class="${isBid ? "text-green" : "text-red"}" style="margin-left: 4px;">
+                      ${isBid ? "\u{1F7E2} BID" : "\u{1F534} ASK"} ${mw.dominantWallMultiple.toFixed(1)}x (${priceFmt} \xB7 $${Math.round(mw.dominantWallUsd / 1e3)}K)
+                    </span>
+                  </button>
+                `;
+    }).join("")}
+          </div>
+        ` : ""}
 
         <div class="aladdin-kpi-grid">
           <div class="kpi-card">
@@ -7950,13 +8351,15 @@ var ApexWebTerminal = class {
     const livePrice = ticker?.price || (sym === "BTCUSDT" ? 85200 : sym === "ETHUSDT" ? 2250 : sym === "SOLUSDT" ? 142 : 100);
     const chartData = this.chartService.buildChartData();
     const candles = chartData.symbol === sym && chartData.candles.length >= 5 ? chartData.candles : [];
-    const obSnap = this.orderbookService.getSymbol() === sym ? this.orderbookService.getSnapshot() : null;
+    const obSnap = this.orderbookService.getSnapshotForSymbol(sym);
     const oiSnap = this.onChainService.getSnapshot();
     const oiUsd = oiSnap.openInterest.get(sym)?.openInterestUsd || (sym === "BTCUSDT" ? 68e8 : sym === "ETHUSDT" ? 29e8 : 85e7);
     const fundingItem = this.fundingRates.find((f) => f.symbol === sym);
     const fundingRate = fundingItem?.fundingRate ?? 1e-4;
     const priceMap = /* @__PURE__ */ new Map();
     this.tickers.forEach((v, k) => priceMap.set(k, v.price));
+    this.executionBlotter.updateWithLivePrices(priceMap);
+    const blotterSummary = this.executionBlotter.getSummary();
     const alphaSummary = this.alphaTracker.syncSignalsAndPrices(
       this.whaleStream.getAlphaSignals(),
       priceMap
@@ -7965,7 +8368,8 @@ var ApexWebTerminal = class {
       sym,
       livePrice,
       oiUsd,
-      fundingRate
+      fundingRate,
+      candles
     );
     const setup = QuantExecutionCalculator.calculateTradeSetup({
       symbol: sym,
@@ -7997,8 +8401,8 @@ var ApexWebTerminal = class {
       <div class="terminal-screen screen-exec">
         <div class="screen-header">
           <div class="screen-title-group">
-            <h2 class="screen-title">\u{1F9EE} QUANT EXECUTION CALCULATOR, WALL-PROTECTED STOP &amp; LIQUIDATION MAGNETS</h2>
-            <span class="screen-subtitle">ATR VOLATILITY BUFFER \xB7 L2 LIQUIDITY WALL SHIELD \xB7 HALF-KELLY POSITION SIZING \xB7 25X-100X LIQUIDATION POOLS</span>
+            <h2 class="screen-title">\u{1F9EE} QUANT EXECUTION CALCULATOR, WALL-PROTECTED STOP &amp; HVN LIQUIDATION MAGNETS</h2>
+            <span class="screen-subtitle">ATR VOLATILITY BUFFER \xB7 L2 LIQUIDITY WALL SHIELD \xB7 HALF-KELLY SIZING \xB7 VOLUME-PROFILE HVN LIQUIDATION POOLS</span>
           </div>
           <div class="header-stat-pills">
             ${symbols.map(
@@ -8074,19 +8478,24 @@ var ApexWebTerminal = class {
           </div>
 
           <div class="whale-kpi-card">
-            <span class="kpi-label">PRIMARY LIQUIDATION MAGNET</span>
+            <span class="kpi-label">PRIMARY HVN LIQUIDATION MAGNET</span>
             <span class="kpi-val ${magnets.primaryMagnet.side === "SHORT_LIQ_MAGNET" ? "text-green" : "text-red"}">${fmtPrice(magnets.primaryMagnet.priceLevel)}</span>
-            <span class="kpi-sub">${magnets.primaryMagnet.tier} ${magnets.primaryMagnet.side === "SHORT_LIQ_MAGNET" ? "Short Squeeze" : "Long Flush"} ($${(magnets.primaryMagnet.estimatedPoolUsd / 1e6).toFixed(1)}M Pool)</span>
+            <span class="kpi-sub">${magnets.primaryMagnet.tier} ${magnets.primaryMagnet.side === "SHORT_LIQ_MAGNET" ? "Short Squeeze" : "Long Flush"} \xB7 POC ${fmtPrice(magnets.pocPrice)}</span>
           </div>
         </div>
 
         <!-- Two-Column Institutional Execution Ticket & Liquidation Magnet Ladder -->
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px;">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; margin-bottom: 16px;">
           <!-- Left: Actionable Trade Ticket -->
           <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 16px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
               <span style="font-weight: 700; color: var(--amber-bright); letter-spacing: 0.06em;">\u{1F3AF} INSTITUTIONAL EXECUTION TICKET (${sym})</span>
-              <span class="badge ${this.execDirection === "LONG" ? "badge-green" : "badge-red"}">${this.execDirection} ${setup.recommendedLeverage}x</span>
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <span class="badge ${this.execDirection === "LONG" ? "badge-green" : "badge-red"}">${this.execDirection} ${setup.recommendedLeverage}x</span>
+                <button id="btn-exec-open-position" class="btn-go" style="padding: 5px 12px; font-size: 11px;">
+                  \u26A1 EXECUTE 1R TICKET
+                </button>
+              </div>
             </div>
 
             <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 14px; line-height: 1.5; background: var(--bg-panel); padding: 10px; border-radius: 4px; border-left: 3px solid var(--amber-bright);">
@@ -8116,19 +8525,19 @@ var ApexWebTerminal = class {
                   <td class="text-red">-$${Math.round(setup.maxRiskDollarUsd).toLocaleString()}</td>
                 </tr>
                 <tr>
-                  <td><strong class="text-green">\u2705 TAKE PROFIT 1 (+1.5R Conservative)</strong></td>
+                  <td><strong class="text-green">\u2705 TAKE PROFIT 1 (+1.5R \xB7 35% + Auto-BE)</strong></td>
                   <td class="text-green"><strong>${fmtPrice(setup.takeProfit1_15R)}</strong></td>
                   <td class="text-green">+${(setup.stopDistancePercent * 1.5).toFixed(2)}%</td>
                   <td class="text-green">+$${Math.round(setup.maxRiskDollarUsd * 1.5).toLocaleString()}</td>
                 </tr>
                 <tr>
-                  <td><strong class="text-green">\u{1F680} TAKE PROFIT 2 (+2.5R Core Target)</strong></td>
+                  <td><strong class="text-green">\u{1F680} TAKE PROFIT 2 (+2.5R \xB7 35% Core)</strong></td>
                   <td class="text-green"><strong>${fmtPrice(setup.takeProfit2_25R)}</strong></td>
                   <td class="text-green">+${(setup.stopDistancePercent * 2.5).toFixed(2)}%</td>
                   <td class="text-green">+$${Math.round(setup.maxRiskDollarUsd * 2.5).toLocaleString()}</td>
                 </tr>
                 <tr>
-                  <td><strong class="text-amber">\u{1F9F2} TAKE PROFIT 3 (50x Liq Magnet)</strong></td>
+                  <td><strong class="text-amber">\u{1F9F2} TAKE PROFIT 3 (50x HVN Magnet \xB7 30%)</strong></td>
                   <td class="text-amber"><strong>${fmtPrice(setup.takeProfit3_Magnet)}</strong></td>
                   <td class="text-amber">${((setup.takeProfit3_Magnet - setup.optimalEntryPrice) / setup.optimalEntryPrice * 100).toFixed(2)}%</td>
                   <td class="text-amber">+$${Math.round(Math.abs(setup.takeProfit3_Magnet - setup.optimalEntryPrice) * setup.positionSizeCoins).toLocaleString()}</td>
@@ -8137,20 +8546,21 @@ var ApexWebTerminal = class {
             </table>
           </div>
 
-          <!-- Right: Liquidation Magnet Cluster Map -->
+          <!-- Right: Liquidation Magnet Cluster Map (Anchored to Volume Profile HVN) -->
           <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 16px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
-              <span style="font-weight: 700; color: var(--cyan-bright); letter-spacing: 0.06em;">\u{1F9F2} LIQUIDATION MAGNET HEATMAP (OI CLUSTER POOLS)</span>
-              <span style="font-size: 11px; color: var(--text-muted);">OI: $${(oiUsd / 1e9).toFixed(2)}B</span>
+              <span style="font-weight: 700; color: var(--cyan-bright); letter-spacing: 0.06em;">\u{1F9F2} HVN-ANCHORED LIQUIDATION MAGNET HEATMAP</span>
+              <span style="font-size: 11px; color: var(--text-muted);">POC: ${fmtPrice(magnets.pocPrice)} \xB7 OI: $${(oiUsd / 1e9).toFixed(2)}B</span>
             </div>
 
             <table class="terminal-table">
               <thead>
                 <tr>
                   <th>CLUSTER POOL</th>
+                  <th>HVN ANCHOR</th>
                   <th>MAGNET PRICE</th>
                   <th>DIST %</th>
-                  <th>EST. POOL ($)</th>
+                  <th>POOL ($)</th>
                   <th>GRAVITY</th>
                 </tr>
               </thead>
@@ -8165,18 +8575,98 @@ var ApexWebTerminal = class {
                           ${isShortLiq ? "\u{1F53C}" : "\u{1F53D}"} ${z.tier} ${isShortLiq ? "SHORT SQUEEZE" : "LONG FLUSH"}
                         </span>
                       </td>
+                      <td class="text-dim">${fmtPrice(z.hvnAnchorPrice)}</td>
                       <td><strong>${fmtPrice(z.priceLevel)}</strong></td>
                       <td class="${z.distancePercent >= 0 ? "text-green" : "text-red"}">
                         ${z.distancePercent >= 0 ? "+" : ""}${z.distancePercent.toFixed(2)}%
                       </td>
                       <td>$${(z.estimatedPoolUsd / 1e6).toFixed(1)}M</td>
-                      <td style="width: 110px;">
+                      <td style="width: 90px;">
                         <div style="background: var(--bg-void); height: 8px; border-radius: 4px; overflow: hidden;">
                           <div style="width: ${z.gravityScore}%; height: 100%; background: ${barColor};"></div>
                         </div>
                       </td>
                     </tr>
                   `;
+    }).join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Bottom: Live Active Positions & Execution Blotter -->
+        <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
+            <div>
+              <span style="font-weight: 700; color: var(--amber-bright); letter-spacing: 0.06em;">\u{1F4CB} LIVE EXECUTION BLOTTER &amp; ACTIVE POSITIONS (AUTO TP1/TP2/TP3 + BREAKEVEN SHIELD)</span>
+            </div>
+            <div style="display: flex; gap: 12px; align-items: center; font-size: 11px;">
+              <span>OPEN: <strong>${blotterSummary.openPositions.length}</strong></span>
+              <span>UNREALIZED: <strong class="${blotterSummary.totalUnrealizedPnlUsd >= 0 ? "text-green" : "text-red"}">${blotterSummary.totalUnrealizedPnlUsd >= 0 ? "+" : ""}$${blotterSummary.totalUnrealizedPnlUsd.toLocaleString()}</strong></span>
+              <span>REALIZED: <strong class="${blotterSummary.totalRealizedPnlUsd >= 0 ? "text-green" : "text-red"}">${blotterSummary.totalRealizedPnlUsd >= 0 ? "+" : ""}$${blotterSummary.totalRealizedPnlUsd.toLocaleString()}</strong></span>
+              <span>WIN RATE: <strong class="text-cyan">${blotterSummary.winRatePercent.toFixed(1)}%</strong> (${blotterSummary.avgRMultiple >= 0 ? "+" : ""}${blotterSummary.avgRMultiple.toFixed(2)}R avg)</span>
+              ${blotterSummary.closedPositions.length > 0 ? `<button id="btn-blotter-clear" class="terminal-btn-sm">\u{1F9F9} CLEAR CLOSED</button>` : ""}
+            </div>
+          </div>
+
+          <div class="market-matrix-table-wrap">
+            <table class="terminal-table">
+              <thead>
+                <tr>
+                  <th>STATUS / ASSET</th>
+                  <th>SIDE &amp; LEV</th>
+                  <th>SIZE</th>
+                  <th>ENTRY &rarr; MARK</th>
+                  <th>ACTIVE STOP-LOSS</th>
+                  <th>LADDER PROGRESS (TP1 / TP2 / TP3)</th>
+                  <th>NET PnL ($ &amp; R)</th>
+                  <th>EXECUTION ACTIONS</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${blotterSummary.openPositions.length === 0 && blotterSummary.closedPositions.length === 0 ? `<tr><td colspan="8" style="text-align:center; color: var(--text-muted); padding: 18px;">No active or closed positions yet. Click <strong>\u26A1 EXECUTE 1R TICKET</strong> above to open a live-tracked position with automatic TP1/TP2/TP3 and Breakeven SL protection.</td></tr>` : [
+      ...blotterSummary.openPositions,
+      ...blotterSummary.closedPositions.slice(0, 8)
+    ].map((pos) => {
+      const isOpen = pos.status === "OPEN";
+      const pnlClass = pos.totalPnlUsd >= 0 ? "text-green" : "text-red";
+      const pnlSign = pos.totalPnlUsd >= 0 ? "+" : "";
+      return `
+                          <tr>
+                            <td>
+                              <span class="badge ${isOpen ? "badge-cyan" : pos.totalPnlUsd >= 0 ? "badge-green" : "badge-red"}">${pos.status}</span>
+                              <strong style="margin-left: 6px;">${pos.asset}</strong>
+                            </td>
+                            <td>
+                              <span class="${pos.direction === "LONG" ? "text-green" : "text-red"}" style="font-weight: 700;">
+                                ${pos.direction} ${pos.leverage}x
+                              </span>
+                            </td>
+                            <td>${pos.remainingSizeCoins.toFixed(4)} / ${pos.initialSizeCoins.toFixed(4)} ${pos.asset}</td>
+                            <td>${fmtPrice(pos.entryPrice)} &rarr; <strong>${fmtPrice(pos.currentPrice)}</strong></td>
+                            <td class="${pos.isBreakevenStop ? "text-cyan" : "text-red"}">
+                              <strong>${fmtPrice(pos.stopLossPrice)}</strong>
+                              ${pos.isBreakevenStop ? `<span class="badge badge-cyan" style="margin-left:4px;">BE LOCKED</span>` : ""}
+                            </td>
+                            <td>
+                              <span class="badge ${pos.tp1Hit ? "badge-green" : ""}" style="opacity:${pos.tp1Hit ? "1" : "0.45"};">TP1 1.5R</span>
+                              <span class="badge ${pos.tp2Hit ? "badge-green" : ""}" style="opacity:${pos.tp2Hit ? "1" : "0.45"};">TP2 2.5R</span>
+                              <span class="badge ${pos.tp3Hit ? "badge-amber" : ""}" style="opacity:${pos.tp3Hit ? "1" : "0.45"};">TP3 MAG</span>
+                            </td>
+                            <td class="${pnlClass}">
+                              <strong>${pnlSign}$${pos.totalPnlUsd.toLocaleString()}</strong>
+                              <span style="margin-left:4px;">(${pnlSign}${pos.currentRMultiple.toFixed(2)}R)</span>
+                            </td>
+                            <td>
+                              ${isOpen ? `
+                                <div style="display:flex; gap:6px;">
+                                  ${!pos.isBreakevenStop ? `<button class="terminal-btn-sm btn-pos-be" data-pos-id="${pos.id}" title="Move Stop-Loss to Entry Price">\u{1F6E1}\uFE0F SL &rarr; BE</button>` : ""}
+                                  <button class="terminal-btn-sm btn-pos-close" data-pos-id="${pos.id}" style="color: var(--red-bright);">\u2716 CLOSE MKT</button>
+                                </div>
+                              ` : `<span class="text-dim" style="font-size:10px;">${pos.closeNote || "Closed"}</span>`}
+                            </td>
+                          </tr>
+                        `;
     }).join("")}
               </tbody>
             </table>
@@ -8193,9 +8683,45 @@ var ApexWebTerminal = class {
           if (this.orderbookService.getSymbol() !== s) {
             this.orderbookService.switchSymbol(s);
           }
+          if (this.chartService.getSymbol() !== s) {
+            this.chartService.loadCandles(s, this.chartService.getTimeframe()).then(() => {
+              if (this.activeScreen === "EXEC")
+                this.renderExecScreen(container);
+            });
+          }
           this.renderExecScreen(container);
         }
       });
+    });
+    document.getElementById("btn-exec-open-position")?.addEventListener("click", () => {
+      playCommandGo();
+      this.executionBlotter.openPositionFromSetup(setup);
+      this.renderExecScreen(container);
+    });
+    container.querySelectorAll(".btn-pos-be").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const id = e.currentTarget.getAttribute("data-pos-id");
+        if (id) {
+          playCommandGo();
+          this.executionBlotter.moveStopToBreakeven(id);
+          this.renderExecScreen(container);
+        }
+      });
+    });
+    container.querySelectorAll(".btn-pos-close").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const id = e.currentTarget.getAttribute("data-pos-id");
+        if (id) {
+          playCommandGo();
+          this.executionBlotter.closePositionAtMarket(id);
+          this.renderExecScreen(container);
+        }
+      });
+    });
+    document.getElementById("btn-blotter-clear")?.addEventListener("click", () => {
+      playCommandGo();
+      this.executionBlotter.clearClosedHistory();
+      this.renderExecScreen(container);
     });
     document.getElementById("btn-exec-long")?.addEventListener("click", () => {
       playCommandGo();
