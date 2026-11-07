@@ -70,6 +70,17 @@
         --text-muted: #b8b8ad;
         --text-dim: #85887e;
 
+        /* Semantic token aliases for Quant, Derivatives, Orderbook & Execution modules */
+        --bg-card: var(--crt-card);
+        --bg-panel: var(--crt-surface);
+        --bg-void: var(--crt-bg);
+        --border-subtle: var(--crt-border);
+        --amber-bright: var(--amber);
+        --green-bright: var(--green);
+        --red-bright: var(--red);
+        --text-primary: var(--text-main);
+        --text-secondary: var(--text-muted);
+
         --font-serif: "Fraunces", Georgia, "Times New Roman", serif;
         --font-sans:
           "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
@@ -116,6 +127,16 @@
         --text-main: #17181a;
         --text-muted: #6f6d64;
         --text-dim: #a5a297;
+
+        --bg-card: var(--crt-card);
+        --bg-panel: var(--crt-surface);
+        --bg-void: var(--crt-bg);
+        --border-subtle: var(--crt-border);
+        --amber-bright: var(--amber);
+        --green-bright: var(--green);
+        --red-bright: var(--red);
+        --text-primary: var(--text-main);
+        --text-secondary: var(--text-muted);
 
         --bg-texture: none;
       }
@@ -1224,6 +1245,193 @@
       }
       .mt-4 {
         margin-top: 16px;
+      }
+
+      /* Table Horizontal Scroll Wrapper & Whale KPI Grid */
+      .market-matrix-table-wrap {
+        width: 100%;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        border-radius: 8px;
+      }
+
+      .whale-kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 12px;
+      }
+
+      .whale-kpi-card {
+        background: var(--crt-card);
+        border: 1px solid var(--crt-border);
+        border-radius: 10px;
+        padding: 14px 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      /* Responsive Multi-Column Grids */
+      .resp-grid-2 {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .resp-grid-2-inner {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .resp-grid-3 {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .resp-grid-4 {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .resp-tg-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr auto auto;
+        gap: 10px;
+        align-items: center;
+      }
+
+      /* ==========================================================================
+         MOBILE & TABLET ERGONOMICS (@media max-width: 960px & 640px)
+         ========================================================================== */
+      @media (max-width: 960px) {
+        .resp-grid-2 {
+          grid-template-columns: 1fr !important;
+        }
+        .resp-tg-grid {
+          grid-template-columns: 1fr 1fr !important;
+        }
+        .terminal-header {
+          flex-wrap: wrap;
+          gap: 8px;
+          padding: 10px 12px;
+        }
+        .header-left,
+        .header-right {
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .terminal-tag {
+          display: none;
+        }
+        .terminal-body {
+          padding: 12px;
+          gap: 12px;
+        }
+      }
+
+      @media (max-width: 640px) {
+        body {
+          font-size: 12.5px;
+        }
+        .terminal-header {
+          padding: 8px 10px;
+        }
+        .terminal-brand {
+          font-size: 1.05rem;
+        }
+        .system-time {
+          font-size: 0.7rem;
+        }
+        .header-right {
+          width: 100%;
+          justify-content: space-between;
+        }
+        .command-bar-section {
+          padding: 8px 10px;
+          gap: 7px;
+        }
+        .command-input {
+          font-size: 0.82rem;
+        }
+        .cmd-chip {
+          padding: 6px 11px;
+          font-size: 0.73rem;
+        }
+        .terminal-body {
+          padding: 9px;
+          gap: 10px;
+        }
+        .screen-title {
+          font-size: 1.02rem;
+          line-height: 1.3;
+        }
+        .screen-subtitle {
+          font-size: 0.68rem;
+          line-height: 1.35;
+        }
+        .aladdin-kpi-grid,
+        .whale-kpi-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+        }
+        .kpi-card,
+        .whale-kpi-card {
+          padding: 10px 11px;
+        }
+        .kpi-val {
+          font-size: 1.12rem;
+        }
+        .resp-grid-2-inner {
+          grid-template-columns: 1fr !important;
+        }
+        .resp-grid-4 {
+          grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        }
+        .resp-grid-3 {
+          grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+        }
+        .resp-tg-grid {
+          grid-template-columns: 1fr !important;
+        }
+        .editor-row {
+          grid-template-columns: 1fr 1fr;
+          background: var(--crt-card);
+          padding: 8px;
+          border-radius: 6px;
+          border: 1px solid var(--crt-border);
+        }
+        .chart-canvas-wrap {
+          height: 330px;
+        }
+        .chart-canvas {
+          touch-action: pan-y;
+        }
+        .terminal-table {
+          font-size: 0.76rem;
+        }
+        .terminal-table th,
+        .terminal-table td {
+          padding: 7px 8px;
+          white-space: nowrap;
+        }
+        .terminal-footer {
+          padding: 10px;
+          flex-direction: column;
+          align-items: flex-start;
+        }
+      }
+
+      @media (max-width: 400px) {
+        .aladdin-kpi-grid,
+        .whale-kpi-grid {
+          grid-template-columns: 1fr;
+        }
+        .resp-grid-3 {
+          grid-template-columns: 1fr !important;
+        }
       }
     </style>
   </head>

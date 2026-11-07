@@ -110,6 +110,29 @@ export class CanvasChartRenderer {
       this.hoveredCandle = null;
       this.render();
     });
+
+    // Mobile single-finger touch crosshair & OHLCV HUD inspection
+    const handleTouch = (e: TouchEvent) => {
+      if (!e.touches || e.touches.length === 0) return;
+      const touch = e.touches[0]!;
+      const rect = this.canvas.getBoundingClientRect();
+      this.hoverX = touch.clientX - rect.left;
+      this.hoverY = touch.clientY - rect.top;
+      this.render();
+    };
+
+    this.canvas.addEventListener("touchstart", handleTouch, { passive: true });
+    this.canvas.addEventListener("touchmove", handleTouch, { passive: true });
+    this.canvas.addEventListener(
+      "touchend",
+      () => {
+        this.hoverX = null;
+        this.hoverY = null;
+        this.hoveredCandle = null;
+        this.render();
+      },
+      { passive: true },
+    );
   }
 
   public render(): void {

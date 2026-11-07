@@ -1191,13 +1191,13 @@ class ApexWebTerminal {
             <span class="returns-badge badge-live">● $500K SWEEP IMPACT: BUY +${snap.slippageBuy1M_Bps.toFixed(2)} bps / SELL -${snap.slippageSell1M_Bps.toFixed(2)} bps</span>
           </div>
 
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+          <div class="resp-grid-2">
             <!-- TOP 4 BID CAPITAL CLUSTERS -->
             <div style="background: rgba(16, 185, 129, 0.04); border: 1px solid rgba(16, 185, 129, 0.22); border-radius: 6px; padding: 10px;">
               <div style="font-size: 11px; font-weight: 800; color: var(--green); margin-bottom: 8px; letter-spacing: 0.05em;">
                 🟢 ТОП-4 ЗОНЫ КАПИТАЛА ПОКУПАТЕЛЕЙ (BID LIQUIDITY POOLS — ЗОНЫ ОТСКОКА &amp; ЗАЩИТЫ)
               </div>
-              <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
+              <div class="resp-grid-2-inner">
                 ${grouped.topBidClusters
                   .map(
                     (c, idx) => `
@@ -1224,7 +1224,7 @@ class ApexWebTerminal {
               <div style="font-size: 11px; font-weight: 800; color: var(--red); margin-bottom: 8px; letter-spacing: 0.05em;">
                 🔴 ТОП-4 ЗОНЫ КАПИТАЛА ПРОДАВЦОВ (ASK LIQUIDITY POOLS — ЗОНЫ СОПРОТИВЛЕНИЯ &amp; ФИКСАЦИИ)
               </div>
-              <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
+              <div class="resp-grid-2-inner">
                 ${grouped.topAskClusters
                   .map(
                     (c, idx) => `
@@ -1249,7 +1249,7 @@ class ApexWebTerminal {
         </div>
 
         <!-- GROUPED BIDS & ASKS LADDERS -->
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;" class="mt-3">
+        <div class="resp-grid-2 mt-3">
           <!-- BIDS LADDER -->
           <div class="market-matrix-table-wrap">
             <table class="terminal-table">
@@ -1648,7 +1648,7 @@ class ApexWebTerminal {
         <section class="terminal-section mt-3">
           <span class="section-title">📱 TELEGRAM QUANT BOT WEBHOOK BRIDGE (MOBILE ALPHA DISPATCH)</span>
           <p class="section-desc">Connect your personal Telegram Bot Token (@BotFather) and Chat ID to receive instant Markdown alerts when Kraken blocks (&ge;$1M) or Limit Absorption signals trigger.</p>
-          <div style="display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 10px; align-items: center;" class="mt-2">
+          <div class="resp-tg-grid mt-2">
             <input type="password" id="input-tg-token" class="form-input" value="${tgConfig.botToken}" placeholder="Telegram Bot Token (e.g. 123456:ABC-DEF...)" />
             <input type="text" id="input-tg-chat" class="form-input" value="${tgConfig.chatId}" placeholder="Telegram Chat ID (e.g. 987654321 or @channel)" />
             <button id="btn-save-tg" class="btn-amber">💾 SAVE BRIDGE</button>
@@ -3068,7 +3068,7 @@ class ApexWebTerminal {
         </div>
 
         <!-- Two-Column Institutional Execution Ticket & Liquidation Magnet Ladder -->
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; margin-bottom: 16px;">
+        <div class="resp-grid-2" style="margin-bottom: 16px;">
           <!-- Left: Actionable Trade Ticket -->
           <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 16px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
@@ -3447,12 +3447,12 @@ class ApexWebTerminal {
         </div>
 
         <!-- Section 1: Deribit Institutional Options Intelligence (BTC & ETH) -->
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 16px; margin-bottom: 18px;">
+        <div class="resp-grid-2" style="margin-bottom: 18px;">
           ${[btcOpt, ethOpt]
             .map(
               (opt) => `
             <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 15px;">
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px; flex-wrap: wrap; gap: 6px;">
                 <span style="font-weight: 700; color: var(--amber-bright); font-size: 13px;">
                   🏛️ DERIBIT ${opt.currency} OPTIONS GAMMA &amp; MAX PAIN MATRIX
                 </span>
@@ -3461,7 +3461,7 @@ class ApexWebTerminal {
                 </span>
               </div>
 
-              <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 10px;">
+              <div class="resp-grid-4" style="margin-bottom: 10px;">
                 <div style="background: var(--bg-panel); padding: 8px; border-radius: 4px;">
                   <div style="font-size: 10px; color: var(--text-muted);">MAX PAIN STRIKE</div>
                   <div style="font-size: 15px; font-weight: 700; color: var(--amber-bright);">$${opt.maxPainStrike.toLocaleString()}</div>
@@ -3842,7 +3842,7 @@ class ApexWebTerminal {
         </div>
 
         <!-- SECTION 3: DEFILLAMA GLOBAL STABLECOIN MINT/BURN & L1/L2 CHAIN TVL VELOCITY -->
-        <div class="mt-3" style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+        <div class="resp-grid-2 mt-3">
           <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px 14px;">
             <div style="font-size: 12px; font-weight: 800; color: var(--amber-bright); margin-bottom: 8px; letter-spacing: 0.05em;">
               🏦 3A. DEFILLAMA GLOBAL STABLECOIN MINT / BURN IMPULSE (ПОРОХ НА РЫНКЕ)
@@ -3850,7 +3850,7 @@ class ApexWebTerminal {
             <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px;">
               Эмиссия стейблкоинов — главный опережающий индикатор притока живого институционального фиата в крипто-экосистему.
             </div>
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px;">
+            <div class="resp-grid-3" style="margin-bottom: 10px;">
               <div style="background: rgba(10, 15, 29, 0.8); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
                 <div style="font-size: 10px; color: var(--text-muted);">TETHER (USDT)</div>
                 <div style="font-size: 15px; font-weight: 800; color: var(--green);">$${((usdtItem?.circulatingUsd ?? 142e9) / 1e9).toFixed(2)}B</div>
@@ -3876,7 +3876,7 @@ class ApexWebTerminal {
             <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px;">
               Распределение институционального DeFi-капитала (Total Value Locked) по ключевым блокчейнам первого уровня.
             </div>
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
+            <div class="resp-grid-3">
               ${macroLiq.topChains
                 .map(
                   (c) => `

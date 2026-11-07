@@ -3971,6 +3971,26 @@ var CanvasChartRenderer = class {
       this.hoveredCandle = null;
       this.render();
     });
+    const handleTouch = (e) => {
+      if (!e.touches || e.touches.length === 0) return;
+      const touch = e.touches[0];
+      const rect = this.canvas.getBoundingClientRect();
+      this.hoverX = touch.clientX - rect.left;
+      this.hoverY = touch.clientY - rect.top;
+      this.render();
+    };
+    this.canvas.addEventListener("touchstart", handleTouch, { passive: true });
+    this.canvas.addEventListener("touchmove", handleTouch, { passive: true });
+    this.canvas.addEventListener(
+      "touchend",
+      () => {
+        this.hoverX = null;
+        this.hoverY = null;
+        this.hoveredCandle = null;
+        this.render();
+      },
+      { passive: true }
+    );
   }
   render() {
     const rect = this.canvas.getBoundingClientRect();
@@ -8102,13 +8122,13 @@ var ApexWebTerminal = class {
             <span class="returns-badge badge-live">\u25CF $500K SWEEP IMPACT: BUY +${snap.slippageBuy1M_Bps.toFixed(2)} bps / SELL -${snap.slippageSell1M_Bps.toFixed(2)} bps</span>
           </div>
 
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+          <div class="resp-grid-2">
             <!-- TOP 4 BID CAPITAL CLUSTERS -->
             <div style="background: rgba(16, 185, 129, 0.04); border: 1px solid rgba(16, 185, 129, 0.22); border-radius: 6px; padding: 10px;">
               <div style="font-size: 11px; font-weight: 800; color: var(--green); margin-bottom: 8px; letter-spacing: 0.05em;">
                 \u{1F7E2} \u0422\u041E\u041F-4 \u0417\u041E\u041D\u042B \u041A\u0410\u041F\u0418\u0422\u0410\u041B\u0410 \u041F\u041E\u041A\u0423\u041F\u0410\u0422\u0415\u041B\u0415\u0419 (BID LIQUIDITY POOLS \u2014 \u0417\u041E\u041D\u042B \u041E\u0422\u0421\u041A\u041E\u041A\u0410 &amp; \u0417\u0410\u0429\u0418\u0422\u042B)
               </div>
-              <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
+              <div class="resp-grid-2-inner">
                 ${grouped.topBidClusters.map(
       (c, idx) => `
                   <div style="background: rgba(10, 15, 29, 0.85); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 5px; padding: 8px 10px;">
@@ -8133,7 +8153,7 @@ var ApexWebTerminal = class {
               <div style="font-size: 11px; font-weight: 800; color: var(--red); margin-bottom: 8px; letter-spacing: 0.05em;">
                 \u{1F534} \u0422\u041E\u041F-4 \u0417\u041E\u041D\u042B \u041A\u0410\u041F\u0418\u0422\u0410\u041B\u0410 \u041F\u0420\u041E\u0414\u0410\u0412\u0426\u041E\u0412 (ASK LIQUIDITY POOLS \u2014 \u0417\u041E\u041D\u042B \u0421\u041E\u041F\u0420\u041E\u0422\u0418\u0412\u041B\u0415\u041D\u0418\u042F &amp; \u0424\u0418\u041A\u0421\u0410\u0426\u0418\u0418)
               </div>
-              <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
+              <div class="resp-grid-2-inner">
                 ${grouped.topAskClusters.map(
       (c, idx) => `
                   <div style="background: rgba(10, 15, 29, 0.85); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 5px; padding: 8px 10px;">
@@ -8156,7 +8176,7 @@ var ApexWebTerminal = class {
         </div>
 
         <!-- GROUPED BIDS & ASKS LADDERS -->
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;" class="mt-3">
+        <div class="resp-grid-2 mt-3">
           <!-- BIDS LADDER -->
           <div class="market-matrix-table-wrap">
             <table class="terminal-table">
@@ -8499,7 +8519,7 @@ var ApexWebTerminal = class {
         <section class="terminal-section mt-3">
           <span class="section-title">\u{1F4F1} TELEGRAM QUANT BOT WEBHOOK BRIDGE (MOBILE ALPHA DISPATCH)</span>
           <p class="section-desc">Connect your personal Telegram Bot Token (@BotFather) and Chat ID to receive instant Markdown alerts when Kraken blocks (&ge;$1M) or Limit Absorption signals trigger.</p>
-          <div style="display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 10px; align-items: center;" class="mt-2">
+          <div class="resp-tg-grid mt-2">
             <input type="password" id="input-tg-token" class="form-input" value="${tgConfig.botToken}" placeholder="Telegram Bot Token (e.g. 123456:ABC-DEF...)" />
             <input type="text" id="input-tg-chat" class="form-input" value="${tgConfig.chatId}" placeholder="Telegram Chat ID (e.g. 987654321 or @channel)" />
             <button id="btn-save-tg" class="btn-amber">\u{1F4BE} SAVE BRIDGE</button>
@@ -9702,7 +9722,7 @@ var ApexWebTerminal = class {
         </div>
 
         <!-- Two-Column Institutional Execution Ticket & Liquidation Magnet Ladder -->
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; margin-bottom: 16px;">
+        <div class="resp-grid-2" style="margin-bottom: 16px;">
           <!-- Left: Actionable Trade Ticket -->
           <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 16px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
@@ -10030,11 +10050,11 @@ var ApexWebTerminal = class {
         </div>
 
         <!-- Section 1: Deribit Institutional Options Intelligence (BTC & ETH) -->
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 16px; margin-bottom: 18px;">
+        <div class="resp-grid-2" style="margin-bottom: 18px;">
           ${[btcOpt, ethOpt].map(
       (opt) => `
             <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 15px;">
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px; flex-wrap: wrap; gap: 6px;">
                 <span style="font-weight: 700; color: var(--amber-bright); font-size: 13px;">
                   \u{1F3DB}\uFE0F DERIBIT ${opt.currency} OPTIONS GAMMA &amp; MAX PAIN MATRIX
                 </span>
@@ -10043,7 +10063,7 @@ var ApexWebTerminal = class {
                 </span>
               </div>
 
-              <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 10px;">
+              <div class="resp-grid-4" style="margin-bottom: 10px;">
                 <div style="background: var(--bg-panel); padding: 8px; border-radius: 4px;">
                   <div style="font-size: 10px; color: var(--text-muted);">MAX PAIN STRIKE</div>
                   <div style="font-size: 15px; font-weight: 700; color: var(--amber-bright);">$${opt.maxPainStrike.toLocaleString()}</div>
@@ -10378,7 +10398,7 @@ var ApexWebTerminal = class {
         </div>
 
         <!-- SECTION 3: DEFILLAMA GLOBAL STABLECOIN MINT/BURN & L1/L2 CHAIN TVL VELOCITY -->
-        <div class="mt-3" style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+        <div class="resp-grid-2 mt-3">
           <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px 14px;">
             <div style="font-size: 12px; font-weight: 800; color: var(--amber-bright); margin-bottom: 8px; letter-spacing: 0.05em;">
               \u{1F3E6} 3A. DEFILLAMA GLOBAL STABLECOIN MINT / BURN IMPULSE (\u041F\u041E\u0420\u041E\u0425 \u041D\u0410 \u0420\u042B\u041D\u041A\u0415)
@@ -10386,7 +10406,7 @@ var ApexWebTerminal = class {
             <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px;">
               \u042D\u043C\u0438\u0441\u0441\u0438\u044F \u0441\u0442\u0435\u0439\u0431\u043B\u043A\u043E\u0438\u043D\u043E\u0432 \u2014 \u0433\u043B\u0430\u0432\u043D\u044B\u0439 \u043E\u043F\u0435\u0440\u0435\u0436\u0430\u044E\u0449\u0438\u0439 \u0438\u043D\u0434\u0438\u043A\u0430\u0442\u043E\u0440 \u043F\u0440\u0438\u0442\u043E\u043A\u0430 \u0436\u0438\u0432\u043E\u0433\u043E \u0438\u043D\u0441\u0442\u0438\u0442\u0443\u0446\u0438\u043E\u043D\u0430\u043B\u044C\u043D\u043E\u0433\u043E \u0444\u0438\u0430\u0442\u0430 \u0432 \u043A\u0440\u0438\u043F\u0442\u043E-\u044D\u043A\u043E\u0441\u0438\u0441\u0442\u0435\u043C\u0443.
             </div>
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px;">
+            <div class="resp-grid-3" style="margin-bottom: 10px;">
               <div style="background: rgba(10, 15, 29, 0.8); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
                 <div style="font-size: 10px; color: var(--text-muted);">TETHER (USDT)</div>
                 <div style="font-size: 15px; font-weight: 800; color: var(--green);">$${((usdtItem?.circulatingUsd ?? 142e9) / 1e9).toFixed(2)}B</div>
@@ -10412,7 +10432,7 @@ var ApexWebTerminal = class {
             <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 10px;">
               \u0420\u0430\u0441\u043F\u0440\u0435\u0434\u0435\u043B\u0435\u043D\u0438\u0435 \u0438\u043D\u0441\u0442\u0438\u0442\u0443\u0446\u0438\u043E\u043D\u0430\u043B\u044C\u043D\u043E\u0433\u043E DeFi-\u043A\u0430\u043F\u0438\u0442\u0430\u043B\u0430 (Total Value Locked) \u043F\u043E \u043A\u043B\u044E\u0447\u0435\u0432\u044B\u043C \u0431\u043B\u043E\u043A\u0447\u0435\u0439\u043D\u0430\u043C \u043F\u0435\u0440\u0432\u043E\u0433\u043E \u0443\u0440\u043E\u0432\u043D\u044F.
             </div>
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;">
+            <div class="resp-grid-3">
               ${macroLiq.topChains.map(
       (c) => `
                 <div style="background: rgba(10, 15, 29, 0.8); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
