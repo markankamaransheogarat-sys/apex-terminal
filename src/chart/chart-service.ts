@@ -1,14 +1,22 @@
 /**
  * Apex Terminal - Chart Data Service
  * Fetches real historical candlestick klines from Binance REST API,
- * calculates institutional VWAP and Volume Profile (POC),
+ * calculates institutional VWAP, Volume Profile (POC), Smart Money Concepts (SMC:
+ * Fair Value Gaps, BOS/CHoCH Structure Breaks, Institutional Order Blocks),
+ * MACD (12, 26, 9), and Bollinger Bands (20, 2),
  * and updates candles in real-time from incoming live WebSocket ticks.
  */
 
 import {
+  BollingerBandPoint,
   Candle,
   ChartData,
   ChartTimeframe,
+  FairValueGap,
+  MacdPoint,
+  OrderBlockZone,
+  SmartMoneyAnalysis,
+  StructureBreak,
   VolumeProfileNode,
 } from "./types.js";
 
@@ -46,7 +54,7 @@ export class ChartService {
   public async loadCandles(
     symbol: string = this.currentSymbol,
     timeframe: ChartTimeframe = this.currentTimeframe,
-    limit: number = 100,
+    limit: number = 120,
   ): Promise<ChartData> {
     this.currentSymbol = symbol.toUpperCase();
     this.currentTimeframe = timeframe;
@@ -154,6 +162,9 @@ export class ChartService {
         maxPrice: 0,
         maxVolume: 0,
         pointOfControlPrice: 0,
+        smc: { fairValueGaps: [], structureBreaks: [], orderBlocks: [] },
+        macd: [],
+        bollinger: [],
       };
     }
 
@@ -211,6 +222,9 @@ export class ChartService {
     }));
 
     const pointOfControlPrice = minPrice + (pocIdx + 0.5) * binHeight;
+    const smc = ChartService.detectSmartMoneyConcepts(this.candles);
+    const macd = ChartService.calculateMACD(this.candles);
+    const bollinger = ChartService.calculateBollingerBands(this.candles);
 
     return {
       symbol: this.currentSymbol,
@@ -222,10 +236,241 @@ export class ChartService {
       maxPrice,
       maxVolume,
       pointOfControlPrice,
+      smc,
+      macd,
+      bollinger,
     };
   }
 
-  private getTimeframeDurationMs(tf: ChartTimeframe): number {
+  /**
+   * Institutional Smart Money Concepts (SMC) Engine:
+   * - Detects 3-candle Fair Value Gaps (FVG / Price Imbalances)
+   * - Detects Swing High / Swing Low Structure Breaks (BOS & CHoCH)
+   * - Detects Institutional Order Blocks (Bullish OB / Bearish OB)
+   */
+  public static detectSmartMoneyConcepts(
+    candles: Candle[],
+  ): SmartMoneyAnalysis {
+    const fairValueGaps: FairValueGap[] = [];
+    const structureBreaks: StructureBreak[] = [];
+    const orderBlocks: OrderBlockZone[] = [];
+
+    if (candles.length < 6) {
+      return { fairValueGaps, structureBreaks, orderBlocks };
+    }
+
+    // 1. Fair Value Gaps (FVG)
+    for (let i = 2; i < candles.length; i++) {
+      const c0 = candles[i - 2]!;
+      const c1 = candles[i - 1]!;
+      const c2 = candles[i]!;
+      const midBody = Math.abs(c1.close - c1.open);
+      const avgRange = (c0.high - c0.low + (c2.high - c2.low)) / 2 || 1;
+
+      // Bullish FVG: candle[i-2].high < candle[i].low with displacement
+      if (c2.low > c0.high && midBody > avgRange * 0.35) {
+        let mitigated = false;
+        for (let k = i + 1; k < candles.length; k++) {
+          if (candles[k]!.low <= c0.high) {
+            mitigated = true;
+            break;
+          }
+        }
+        fairValueGaps.push({
+          startIndex: i - 1,
+          topPrice: c2.low,
+          bottomPrice: c0.high,
+          type: "BULLISH",
+          mitigated,
+        });
+      }
+      // Bearish FVG: candle[i-2].low > candle[i].high with displacement
+      else if (c2.high < c0.low && midBody > avgRange * 0.35) {
+        let mitigated = false;
+        for (let k = i + 1; k < candles.length; k++) {
+          if (candles[k]!.high >= c0.low) {
+            mitigated = true;
+            break;
+          }
+        }
+        fairValueGaps.push({
+          startIndex: i - 1,
+          topPrice: c0.low,
+          bottomPrice: c2.high,
+          type: "BEARISH",
+          mitigated,
+        });
+      }
+    }
+
+    // 2. Swing Pivots -> BOS / CHoCH & Order Blocks
+    let lastSwingHighIdx = -1;
+    let lastSwingHighPrice = -Infinity;
+    let lastSwingLowIdx = -1;
+    let lastSwingLowPrice = Infinity;
+    let currentTrend: "BULL" | "BEAR" | "NEUTRAL" = "NEUTRAL";
+
+    const lookback = 3;
+    for (let i = lookback; i < candles.length - 1; i++) {
+      // Check if index (i - 2) was a 2-bar pivot high / low
+      const pIdx = i - 2;
+      if (pIdx >= 2) {
+        const p = candles[pIdx]!;
+        const isPivotHigh =
+          p.high >= candles[pIdx - 1]!.high &&
+          p.high >= candles[pIdx - 2]!.high &&
+          p.high >= candles[pIdx + 1]!.high &&
+          p.high >= candles[pIdx + 2]!.high;
+        const isPivotLow =
+          p.low <= candles[pIdx - 1]!.low &&
+          p.low <= candles[pIdx - 2]!.low &&
+          p.low <= candles[pIdx + 1]!.low &&
+          p.low <= candles[pIdx + 2]!.low;
+
+        if (isPivotHigh) {
+          lastSwingHighIdx = pIdx;
+          lastSwingHighPrice = p.high;
+        }
+        if (isPivotLow) {
+          lastSwingLowIdx = pIdx;
+          lastSwingLowPrice = p.low;
+        }
+      }
+
+      const cur = candles[i]!;
+      // Bullish Break above Last Swing High
+      if (
+        lastSwingHighIdx >= 0 &&
+        i - lastSwingHighIdx <= 35 &&
+        cur.close > lastSwingHighPrice
+      ) {
+        const breakType = currentTrend === "BEAR" ? "CHOCH_BULL" : "BOS_BULL";
+        structureBreaks.push({
+          startIndex: lastSwingHighIdx,
+          breakIndex: i,
+          price: lastSwingHighPrice,
+          type: breakType,
+        });
+
+        // Find last bearish candle between swing high and break as Bullish Order Block
+        for (let k = i - 1; k >= Math.max(0, lastSwingHighIdx - 3); k--) {
+          const obCandle = candles[k]!;
+          if (obCandle.close < obCandle.open) {
+            orderBlocks.push({
+              candleIndex: k,
+              high: obCandle.high,
+              low: obCandle.low,
+              type: "BULL_OB",
+              volumeUsd: obCandle.volume * obCandle.close,
+            });
+            break;
+          }
+        }
+
+        currentTrend = "BULL";
+        lastSwingHighIdx = -1; // consumed
+      }
+
+      // Bearish Break below Last Swing Low
+      if (
+        lastSwingLowIdx >= 0 &&
+        i - lastSwingLowIdx <= 35 &&
+        cur.close < lastSwingLowPrice
+      ) {
+        const breakType = currentTrend === "BULL" ? "CHOCH_BEAR" : "BOS_BEAR";
+        structureBreaks.push({
+          startIndex: lastSwingLowIdx,
+          breakIndex: i,
+          price: lastSwingLowPrice,
+          type: breakType,
+        });
+
+        // Find last bullish candle before bearish break as Bearish Order Block
+        for (let k = i - 1; k >= Math.max(0, lastSwingLowIdx - 3); k--) {
+          const obCandle = candles[k]!;
+          if (obCandle.close > obCandle.open) {
+            orderBlocks.push({
+              candleIndex: k,
+              high: obCandle.high,
+              low: obCandle.low,
+              type: "BEAR_OB",
+              volumeUsd: obCandle.volume * obCandle.close,
+            });
+            break;
+          }
+        }
+
+        currentTrend = "BEAR";
+        lastSwingLowIdx = -1; // consumed
+      }
+    }
+
+    return {
+      fairValueGaps: fairValueGaps.slice(-8),
+      structureBreaks: structureBreaks.slice(-8),
+      orderBlocks: orderBlocks.slice(-5),
+    };
+  }
+
+  /**
+   * Calculates institutional MACD (12, 26, 9)
+   */
+  public static calculateMACD(
+    candles: Candle[],
+    fastPeriod: number = 12,
+    slowPeriod: number = 26,
+    signalPeriod: number = 9,
+  ): MacdPoint[] {
+    if (candles.length === 0) return [];
+    const kFast = 2 / (fastPeriod + 1);
+    const kSlow = 2 / (slowPeriod + 1);
+    const kSig = 2 / (signalPeriod + 1);
+
+    let emaFast = candles[0]!.close;
+    let emaSlow = candles[0]!.close;
+    let emaSignal = 0;
+
+    const result: MacdPoint[] = [];
+    for (let i = 0; i < candles.length; i++) {
+      const price = candles[i]!.close;
+      emaFast = i === 0 ? price : price * kFast + emaFast * (1 - kFast);
+      emaSlow = i === 0 ? price : price * kSlow + emaSlow * (1 - kSlow);
+      const macd = emaFast - emaSlow;
+      emaSignal = i === 0 ? macd : macd * kSig + emaSignal * (1 - kSig);
+      const histogram = macd - emaSignal;
+      result.push({ macd, signal: emaSignal, histogram });
+    }
+    return result;
+  }
+
+  /**
+   * Calculates Bollinger Bands (SMA period + ±mult * standard deviation)
+   */
+  public static calculateBollingerBands(
+    candles: Candle[],
+    period: number = 20,
+    stdDevMult: number = 2,
+  ): BollingerBandPoint[] {
+    const out: BollingerBandPoint[] = [];
+    for (let i = 0; i < candles.length; i++) {
+      const start = Math.max(0, i - period + 1);
+      const slice = candles.slice(start, i + 1);
+      const mean =
+        slice.reduce((acc, c) => acc + c.close, 0) / (slice.length || 1);
+      const variance =
+        slice.reduce((acc, c) => acc + Math.pow(c.close - mean, 2), 0) /
+        (slice.length || 1);
+      const sd = Math.sqrt(variance);
+      out.push({
+        upper: mean + stdDevMult * sd,
+        middle: mean,
+        lower: mean - stdDevMult * sd,
+      });
+    }
+    return out;
+  }
+
+  public getTimeframeDurationMs(tf: ChartTimeframe): number {
     switch (tf) {
       case "1m":
         return 60 * 1000;
@@ -235,6 +480,8 @@ export class ChartService {
         return 15 * 60 * 1000;
       case "1h":
         return 60 * 60 * 1000;
+      case "4h":
+        return 4 * 60 * 60 * 1000;
       case "1d":
         return 24 * 60 * 60 * 1000;
       case "1w":

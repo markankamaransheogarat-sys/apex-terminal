@@ -56,7 +56,11 @@ import {
   ChartRenderOptions,
   ChartVisualMode,
 } from "../chart/canvas-renderer.js";
-import { ChartTimeframe } from "../chart/types.js";
+import {
+  ChartDrawingTool,
+  ChartSubPaneMode,
+  ChartTimeframe,
+} from "../chart/types.js";
 import { BasisArbitrageCalculator } from "../arbitrage/basis-calculator.js";
 import { NewsService } from "../news/news-service.js";
 import { NewsWireSnapshot } from "../news/types.js";
@@ -80,9 +84,13 @@ class ApexWebTerminal {
   private chartRenderer: CanvasChartRenderer | null = null;
   private chartOptions: ChartRenderOptions = {
     visualMode: "CANDLES",
+    drawingTool: "CURSOR",
+    subPaneMode: "MACD",
     showVWAP: true,
     showVwapBands: true,
     showEmaRibbon: true,
+    showBollingerBands: false,
+    showSmcOverlay: true,
     showVolumeProfile: true,
     showGrid: true,
     showWhaleOverlay: true,
@@ -90,6 +98,7 @@ class ApexWebTerminal {
     showTradeSetupBox: true,
     showCvdCurve: true,
   };
+  private chartExpanded: boolean = false;
   private orderbookService: OrderbookService;
   private orderbookBucketStep: number = 0;
   private alphaTracker: AlphaPerformanceTracker;
@@ -902,25 +911,57 @@ class ApexWebTerminal {
     const curSymbol = this.chartService.getSymbol();
     const curTF = this.chartService.getTimeframe();
     const symbols = ["BTC", "ETH", "SOL", "BNB", "SUI", "XRP", "DOGE"];
-    const timeframes: ChartTimeframe[] = ["1m", "5m", "15m", "1h", "1d"];
+    const timeframes: ChartTimeframe[] = ["1m", "5m", "15m", "1h", "4h", "1d"];
     const modes: { id: ChartVisualMode; label: string }[] = [
       { id: "CANDLES", label: "🕯️ CANDLES" },
+      { id: "HOLLOW", label: "🔲 HOLLOW" },
       { id: "HEIKIN_ASHI", label: "🌊 HEIKIN-ASHI" },
       { id: "AREA", label: "📈 AREA" },
+      { id: "BASELINE", label: "⚖️ BASELINE" },
+    ];
+    const tools: { id: ChartDrawingTool; label: string; tip: string }[] = [
+      { id: "CURSOR", label: "➕ CURSOR", tip: "Pan & Crosshair Inspect" },
+      {
+        id: "RULER",
+        label: "📏 RULER",
+        tip: "Click & Drag to Measure Price %, Bars & Distance",
+      },
+      {
+        id: "FIB",
+        label: "🌀 FIBONACCI",
+        tip: "Click & Drag to Draw Auto-Shaded Fibonacci Retracement (0% - 100% + 0.618 Golden Pocket)",
+      },
+      {
+        id: "TRENDLINE",
+        label: "📐 TRENDLINE",
+        tip: "Click & Drag to Draw Diagonal Ray with % Slope",
+      },
+      {
+        id: "HLINE",
+        label: "➖ H-LEVEL",
+        tip: "Single Click on Chart to Drop Permanent Horizontal Price Level",
+      },
+    ];
+    const subPanes: { id: ChartSubPaneMode; label: string }[] = [
+      { id: "MACD", label: "📊 MACD (12,26,9)" },
+      { id: "RSI", label: "⚡ RSI (14)" },
+      { id: "CVD", label: "🔥 CVD VELOCITY" },
+      { id: "NONE", label: "✖ OFF" },
     ];
 
     container.innerHTML = `
       <div class="terminal-screen screen-chart">
         <div class="screen-header">
           <div class="screen-title-group">
-            <h2 class="screen-title">📈 HIGH-FREQUENCY PRO ORDERFLOW &amp; QUANT CHARTING SUITE</h2>
-            <span class="screen-subtitle">60 FPS HTML5 CANVAS • WHEEL ZOOM &amp; DRAG PAN • VWAP ±1.5σ • EMA 20/50 RIBBON • L2 &amp; LIQ HEATMAP • TP/SL R:R BOX • CVD SUB-PANE</span>
+            <h2 class="screen-title">📈 APEX SUPERCHART WORKSTATION v6.0 (TRADINGVIEW PRO + SMC + ORDERFLOW)</h2>
+            <span class="screen-subtitle">60 FPS HTML5 CANVAS • INTERACTIVE FIBONACCI / RULER / TRENDLINE TOOLS • SMART MONEY CONCEPTS (BOS / CHoCH / FVG / OB) • MULTI-PANE MACD &amp; RSI</span>
           </div>
-          <span class="terminal-badge badge-aladdin">PRO SUITE v5.0</span>
+          <span class="terminal-badge badge-aladdin">SUPERCHART v6.0</span>
         </div>
 
         <div class="chart-container-box">
-          <div class="chart-toolbar" style="flex-wrap: wrap; gap: 8px; justify-content: space-between;">
+          <!-- ROW 1: ASSET, TIMEFRAME, VISUAL STYLE & ZOOM/SNAPSHOT -->
+          <div class="chart-toolbar" style="flex-wrap: wrap; gap: 8px; justify-content: space-between; border-bottom: 1px solid rgba(30,41,59,0.7);">
             <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
               <div class="chart-group">
                 <span class="selector-label">ASSET:</span>
@@ -960,42 +1001,78 @@ class ApexWebTerminal {
                   )
                   .join("")}
               </div>
+            </div>
 
-              <div class="chart-group">
-                <span class="selector-label">ZOOM:</span>
-                <button class="chart-btn" id="btn-chart-zoom-in" title="Zoom In (Mouse Wheel Up)">🔍 +</button>
-                <button class="chart-btn" id="btn-chart-zoom-out" title="Zoom Out (Mouse Wheel Down)">🔍 −</button>
-                <button class="chart-btn" id="btn-chart-reset" title="Reset Zoom &amp; Pan">↺ RESET</button>
-              </div>
+            <div class="chart-group" style="flex-wrap: wrap; gap: 4px;">
+              <span class="selector-label">VIEW:</span>
+              <button class="chart-btn" id="btn-chart-zoom-in" title="Zoom In (Mouse Wheel Up)">🔍 +</button>
+              <button class="chart-btn" id="btn-chart-zoom-out" title="Zoom Out (Mouse Wheel Down)">🔍 −</button>
+              <button class="chart-btn" id="btn-chart-reset" title="Reset Zoom, Pan &amp; Y-Scale (or Double-Click Chart)">↺ RESET</button>
+              <button class="chart-btn" id="btn-chart-snap" title="Download High-Res PNG Chart Snapshot">📸 SNAP</button>
+              <button class="chart-btn ${this.chartExpanded ? "active" : ""}" id="btn-chart-expand" title="Toggle Expanded Workstation Height">⛶ ${this.chartExpanded ? "COMPACT" : "EXPAND"}</button>
+            </div>
+          </div>
+
+          <!-- ROW 2: TRADINGVIEW DRAWING TOOLS, INSTITUTIONAL SMC/QUANT LAYERS & OSCILLATOR SUB-PANE -->
+          <div class="chart-toolbar" style="flex-wrap: wrap; gap: 8px; justify-content: space-between; background: rgba(7, 10, 16, 0.78); padding-top: 6px; padding-bottom: 6px;">
+            <div class="chart-group" style="flex-wrap: wrap; gap: 4px;">
+              <span class="selector-label">DRAW:</span>
+              ${tools
+                .map(
+                  (t) => `
+                <button class="chart-btn ${this.chartOptions.drawingTool === t.id ? "active" : ""}" data-chart-tool="${t.id}" title="${t.tip}">
+                  ${t.label}
+                </button>
+              `,
+                )
+                .join("")}
+              <button class="chart-btn" id="btn-chart-undo" title="Undo Last Drawing">↩ UNDO</button>
+              <button class="chart-btn" id="btn-chart-clear" title="Clear All Drawings on Symbol">🗑️ CLEAR</button>
             </div>
 
             <div class="chart-group" style="flex-wrap: wrap; gap: 4px;">
               <span class="selector-label">LAYERS:</span>
+              <button class="chart-btn ${this.chartOptions.showSmcOverlay ? "active" : ""}" data-chart-toggle="showSmcOverlay" title="Toggle Smart Money Concepts: BOS/CHoCH Structure Breaks, Fair Value Gaps (FVG) &amp; Order Blocks (OB)">
+                🧠 SMC (BOS/FVG/OB)
+              </button>
               <button class="chart-btn ${this.chartOptions.showVWAP ? "active" : ""}" data-chart-toggle="showVWAP" title="Toggle Session VWAP &amp; ±1.5σ Bands">
                 📊 VWAP ±1.5σ
               </button>
               <button class="chart-btn ${this.chartOptions.showEmaRibbon ? "active" : ""}" data-chart-toggle="showEmaRibbon" title="Toggle EMA 20 / EMA 50 Trend Ribbon Cloud">
                 📈 EMA 20/50
               </button>
+              <button class="chart-btn ${this.chartOptions.showBollingerBands ? "active" : ""}" data-chart-toggle="showBollingerBands" title="Toggle Bollinger Bands (20, 2σ)">
+                🌐 BB (20,2)
+              </button>
               <button class="chart-btn ${this.chartOptions.showLiquidityHeatmap ? "active" : ""}" data-chart-toggle="showLiquidityHeatmap" title="Toggle Bookmap L2 Capital Walls &amp; 50x-100x Liquidation Pools">
-                🧱 L2 &amp; LIQ HEATMAP
+                🧱 L2 &amp; LIQ
               </button>
               <button class="chart-btn ${this.chartOptions.showTradeSetupBox ? "active" : ""}" data-chart-toggle="showTradeSetupBox" title="Toggle TradingView-style Long/Short R:R Position Box from EXEC <GO>">
-                🎯 TP/SL R:R BOX
+                🎯 R:R BOX
               </button>
               <button class="chart-btn ${this.chartOptions.showWhaleOverlay ? "active" : ""}" data-chart-toggle="showWhaleOverlay" title="Toggle Whale Iceberg Campaign VWAP Lines &amp; Block Prints">
                 🐋 WHALES
               </button>
               <button class="chart-btn ${this.chartOptions.showVolumeProfile ? "active" : ""}" data-chart-toggle="showVolumeProfile" title="Toggle Volume Profile &amp; Point of Control (POC)">
-                📊 POC PROFILE
+                📊 VPVR POC
               </button>
-              <button class="chart-btn ${this.chartOptions.showCvdCurve ? "active" : ""}" data-chart-toggle="showCvdCurve" title="Toggle Sub-Pane Cumulative Volume Delta (CVD) Curve">
-                ⚡ CVD CURVE
-              </button>
+            </div>
+
+            <div class="chart-group" style="flex-wrap: wrap; gap: 4px;">
+              <span class="selector-label">SUB-PANE:</span>
+              ${subPanes
+                .map(
+                  (sp) => `
+                <button class="chart-btn ${this.chartOptions.subPaneMode === sp.id ? "active" : ""}" data-chart-subpane="${sp.id}">
+                  ${sp.label}
+                </button>
+              `,
+                )
+                .join("")}
             </div>
           </div>
 
-          <div class="chart-canvas-wrap">
+          <div class="chart-canvas-wrap" style="${this.chartExpanded ? "height: 760px;" : "height: 560px;"}">
             <canvas id="apex-chart-canvas" class="chart-canvas" style="cursor: crosshair;"></canvas>
           </div>
         </div>
@@ -1013,6 +1090,16 @@ class ApexWebTerminal {
     if (!canvas) return;
 
     this.chartRenderer = new CanvasChartRenderer(canvas, this.chartOptions);
+    this.chartRenderer.setDrawingTool(
+      this.chartOptions.drawingTool ?? "CURSOR",
+      () => {
+        this.chartOptions.drawingTool = "CURSOR";
+        document.querySelectorAll("[data-chart-tool]").forEach((el) => {
+          const id = el.getAttribute("data-chart-tool");
+          el.classList.toggle("active", id === "CURSOR");
+        });
+      },
+    );
 
     this.chartRenderer.resize();
     const data = this.chartService.buildChartData();
@@ -1108,6 +1195,46 @@ class ApexWebTerminal {
       });
     });
 
+    document.querySelectorAll("[data-chart-tool]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const tool = (e.currentTarget as HTMLElement).getAttribute(
+          "data-chart-tool",
+        ) as ChartDrawingTool | null;
+        if (tool) {
+          playTerminalKey();
+          this.chartOptions.drawingTool = tool;
+          this.chartRenderer?.setDrawingTool(tool, () => {
+            this.chartOptions.drawingTool = "CURSOR";
+            document.querySelectorAll("[data-chart-tool]").forEach((el) => {
+              el.classList.toggle(
+                "active",
+                el.getAttribute("data-chart-tool") === "CURSOR",
+              );
+            });
+          });
+          document.querySelectorAll("[data-chart-tool]").forEach((el) => {
+            el.classList.toggle(
+              "active",
+              el.getAttribute("data-chart-tool") === tool,
+            );
+          });
+        }
+      });
+    });
+
+    document.querySelectorAll("[data-chart-subpane]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const sp = (e.currentTarget as HTMLElement).getAttribute(
+          "data-chart-subpane",
+        ) as ChartSubPaneMode | null;
+        if (sp) {
+          playTerminalKey();
+          this.chartOptions.subPaneMode = sp;
+          this.render();
+        }
+      });
+    });
+
     document.querySelectorAll("[data-chart-toggle]").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         const key = (e.currentTarget as HTMLElement).getAttribute(
@@ -1143,6 +1270,31 @@ class ApexWebTerminal {
       ?.addEventListener("click", () => {
         playCommandGo();
         this.chartRenderer?.resetView();
+      });
+
+    document.getElementById("btn-chart-undo")?.addEventListener("click", () => {
+      playTerminalKey();
+      this.chartRenderer?.undoLastDrawing();
+    });
+
+    document
+      .getElementById("btn-chart-clear")
+      ?.addEventListener("click", () => {
+        playCommandGo();
+        this.chartRenderer?.clearDrawings();
+      });
+
+    document.getElementById("btn-chart-snap")?.addEventListener("click", () => {
+      playCommandGo();
+      this.chartRenderer?.exportSnapshotPng();
+    });
+
+    document
+      .getElementById("btn-chart-expand")
+      ?.addEventListener("click", () => {
+        playTerminalKey();
+        this.chartExpanded = !this.chartExpanded;
+        this.render();
       });
   }
 
