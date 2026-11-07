@@ -94,4 +94,44 @@ describe("OrderbookService - Senior Quant L2 Microstructure & Liquidity Walls", 
     assert.equal(grouped.topAskClusters[0]?.levelsMerged, 2);
     assert.ok(grouped.topAskClusters[0]!.shareOfSidePercent > 50);
   });
+
+  it("detects SPOOF_PULLED when a major L2 liquidity wall vanishes without price crossing it", () => {
+    const snap1 = OrderbookService.computeL2Analytics(
+      "SOLUSDT",
+      [
+        ["140.0", "100"],
+        ["139.0", "5000"], // Huge 5000 SOL bid wall at $139
+        ["138.0", "100"],
+      ],
+      [
+        ["141.0", "100"],
+        ["142.0", "100"],
+      ],
+    );
+    const view1 = OrderbookService.groupOrderbookByBucket(snap1, 1);
+    const wall1 = view1.groupedBids.find((b) => b.priceBucket === 139);
+    assert.ok(wall1);
+    assert.equal(wall1.wallStatus, "VERIFIED_FORTRESS");
+
+    // Next snapshot: midPrice is still $140.5 (above $139), but the $139 bid wall dropped by 85% (pulled spoof)
+    const snap2 = OrderbookService.computeL2Analytics(
+      "SOLUSDT",
+      [
+        ["140.0", "100"],
+        ["139.0", "400"], // Pulled from 5000 down to 400 SOL without price touching 139
+        ["138.0", "100"],
+      ],
+      [
+        ["141.0", "100"],
+        ["142.0", "100"],
+      ],
+    );
+    const view2 = OrderbookService.groupOrderbookByBucket(snap2, 1);
+    const wall2 = view2.groupedBids.find((b) => b.priceBucket === 139);
+    assert.ok(wall2);
+    assert.equal(wall2.wallStatus, "SPOOF_PULLED");
+    assert.ok(
+      view2.spoofAndIntegrityEvents.some((e) => e.status === "SPOOF_PULLED"),
+    );
+  });
 });

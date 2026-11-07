@@ -117,6 +117,87 @@ export class AlertManager {
     }
   }
 
+  public static formatTradeSetupTicket(setup: {
+    symbol: string;
+    asset: string;
+    direction: "LONG" | "SHORT";
+    optimalEntryPrice: number;
+    protectedStopLoss: number;
+    stopDistancePercent: number;
+    setupRationale: string;
+    positionSizeCoins: number;
+    positionNotionalUsd: number;
+    recommendedLeverage: number;
+    kellyFractionPercent: number;
+    maxRiskDollarUsd: number;
+    takeProfit1_15R: number;
+    takeProfit2_25R: number;
+    takeProfit3_Magnet: number;
+    rewardToRiskRatio: number;
+  }): string {
+    const fmt = (p: number) =>
+      p < 1
+        ? `$${p.toFixed(4)}`
+        : p < 10
+          ? `$${p.toFixed(3)}`
+          : `$${p.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+    return [
+      `🎯 INSTITUTIONAL QUANT TICKET: ${setup.direction} ${setup.asset} (${setup.symbol})`,
+      `• Entry: ${fmt(setup.optimalEntryPrice)} | Wall-Protected SL: ${fmt(setup.protectedStopLoss)} (-${setup.stopDistancePercent.toFixed(2)}%)`,
+      `• Sizing: ${setup.positionSizeCoins.toFixed(4)} ${setup.asset} ($${Math.round(setup.positionNotionalUsd).toLocaleString()} @ ${setup.recommendedLeverage}x | Half-Kelly ${setup.kellyFractionPercent.toFixed(1)}%)`,
+      `• Targets: TP1 (1.5R -> BE) ${fmt(setup.takeProfit1_15R)} | TP2 (2.5R) ${fmt(setup.takeProfit2_25R)} | TP3 (50x Magnet) ${fmt(setup.takeProfit3_Magnet)}`,
+      `• Edge: R:R ${setup.rewardToRiskRatio.toFixed(2)}x | Max Risk $${setup.maxRiskDollarUsd.toFixed(2)}`,
+      `• Shield: ${setup.setupRationale}`,
+    ].join("\n");
+  }
+
+  public async dispatchTradeSetupTicket(setup: {
+    symbol: string;
+    asset: string;
+    direction: "LONG" | "SHORT";
+    optimalEntryPrice: number;
+    protectedStopLoss: number;
+    stopDistancePercent: number;
+    setupRationale: string;
+    positionSizeCoins: number;
+    positionNotionalUsd: number;
+    recommendedLeverage: number;
+    kellyFractionPercent: number;
+    maxRiskDollarUsd: number;
+    takeProfit1_15R: number;
+    takeProfit2_25R: number;
+    takeProfit3_Magnet: number;
+    rewardToRiskRatio: number;
+  }): Promise<{ telegramSent: boolean; ticketText: string }> {
+    const ticketText = AlertManager.formatTradeSetupTicket(setup);
+    try {
+      if (
+        typeof navigator !== "undefined" &&
+        navigator.clipboard &&
+        typeof navigator.clipboard.writeText === "function"
+      ) {
+        await navigator.clipboard.writeText(ticketText);
+      }
+    } catch {}
+
+    const telegramSent = await this.sendTelegramMessage(
+      `📤 QUANT ORDER TICKET: ${setup.direction} ${setup.asset}`,
+      ticketText,
+    );
+
+    this.pushAlert({
+      id: `alt-tkt-${Date.now()}`,
+      type: "WHALE_BLOCK",
+      title: `📤 QUANT TICKET DISPATCHED (${setup.direction} ${setup.asset})`,
+      message: `${ticketText.replace(/\n/g, " · ")}${telegramSent ? " [SENT TO TELEGRAM]" : " [COPIED TO CLIPBOARD]"}`,
+      severity: "INFO",
+      timestamp: Date.now(),
+    });
+
+    return { telegramSent, ticketText };
+  }
+
   public checkWhaleTrade(trade: {
     asset: string;
     side: string;

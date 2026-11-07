@@ -7,12 +7,15 @@
 import { ChartData, Candle } from "./types.js";
 import { WhaleTrancheCampaign } from "../feeds/whale-cluster-engine.js";
 import { WhaleTrade } from "../feeds/whale-stream.js";
+import { CapitalClusterZone } from "../orderbook/orderbook-service.js";
+import { LiquidationMagnetCluster } from "../execution/quant-execution-calculator.js";
 
 export interface ChartRenderOptions {
   showVWAP?: boolean;
   showVolumeProfile?: boolean;
   showGrid?: boolean;
   showWhaleOverlay?: boolean;
+  showLiquidityHeatmap?: boolean;
 }
 
 export class CanvasChartRenderer {
@@ -22,6 +25,9 @@ export class CanvasChartRenderer {
   private options: ChartRenderOptions;
   private whaleCampaigns: WhaleTrancheCampaign[] = [];
   private whaleTrades: WhaleTrade[] = [];
+  private bidClusters: CapitalClusterZone[] = [];
+  private askClusters: CapitalClusterZone[] = [];
+  private liqMagnets: LiquidationMagnetCluster[] = [];
 
   private hoverX: number | null = null;
   private hoverY: number | null = null;
@@ -44,6 +50,7 @@ export class CanvasChartRenderer {
       showVolumeProfile: true,
       showGrid: true,
       showWhaleOverlay: true,
+      showLiquidityHeatmap: true,
       ...options,
     };
 
@@ -61,6 +68,17 @@ export class CanvasChartRenderer {
   ): void {
     this.whaleCampaigns = campaigns;
     this.whaleTrades = trades;
+    this.render();
+  }
+
+  public setLiquidityHeatmapOverlay(
+    bidClusters: CapitalClusterZone[],
+    askClusters: CapitalClusterZone[],
+    liqMagnets: LiquidationMagnetCluster[],
+  ): void {
+    this.bidClusters = bidClusters;
+    this.askClusters = askClusters;
+    this.liqMagnets = liqMagnets;
     this.render();
   }
 
@@ -359,6 +377,91 @@ export class CanvasChartRenderer {
             ctx.stroke();
           }
         }
+      }
+    }
+
+    // 4C. Bookmap-Style L2 Capital Pool Heatmap Bands & 25x-100x Liquidation Magnets
+    if (this.options.showLiquidityHeatmap) {
+      // Render Top Bid & Ask L2 Capital Concentration Bands
+      const allWalls = [
+        ...this.bidClusters.slice(0, 3),
+        ...this.askClusters.slice(0, 3),
+      ];
+      for (const wall of allWalls) {
+        if (
+          wall.priceBucket >= minPrice * 0.992 &&
+          wall.priceBucket <= maxPrice * 1.008
+        ) {
+          const wy = Math.max(
+            this.padTop + 14,
+            Math.min(this.padTop + priceAreaH - 8, priceToY(wall.priceBucket)),
+          );
+          const isBid = wall.side === "BID";
+          const alpha = Math.min(
+            0.26,
+            Math.max(0.08, wall.shareOfSidePercent / 120),
+          );
+          ctx.fillStyle = isBid
+            ? `rgba(140, 170, 107, ${alpha})`
+            : `rgba(193, 104, 78, ${alpha})`;
+          ctx.fillRect(this.padLeft, wy - 5, plotW, 10);
+
+          ctx.strokeStyle = isBid ? colUp : colDown;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(this.padLeft, wy);
+          ctx.lineTo(width - this.padRight, wy);
+          ctx.stroke();
+
+          const statusIcon =
+            wall.wallStatus === "SPOOF_PULLED"
+              ? "🎭 SPOOF"
+              : wall.wallStatus === "ICEBERG_RELOADED"
+                ? "🧊 ICEBERG"
+                : "🧱 L2 WALL";
+          const label = `${statusIcon} ${isBid ? "BID" : "ASK"} $${wall.priceBucket.toLocaleString()} ($${Math.round(wall.notionalUsd / 1000)}K · ${wall.shareOfSidePercent.toFixed(1)}%)`;
+          ctx.font = "bold 9px monospace";
+          const tw = ctx.measureText(label).width + 8;
+          const tagX = width - this.padRight - tw - 6;
+          ctx.fillStyle = isBid
+            ? "rgba(22, 34, 24, 0.9)"
+            : "rgba(42, 22, 20, 0.9)";
+          ctx.fillRect(tagX, wy - 7, tw, 13);
+          ctx.fillStyle = isBid ? "#c9d9a0" : "#e3a78c";
+          ctx.textAlign = "left";
+          ctx.fillText(label, tagX + 4, wy + 2);
+        }
+      }
+
+      // Render 50x & 100x Liquidation Magnet Lines
+      const keyMagnets = this.liqMagnets.filter(
+        (m) =>
+          (m.tier === "50x" || m.tier === "100x") &&
+          m.priceLevel >= minPrice * 0.992 &&
+          m.priceLevel <= maxPrice * 1.008,
+      );
+      for (const mag of keyMagnets) {
+        const my = Math.max(
+          this.padTop + 14,
+          Math.min(this.padTop + priceAreaH - 8, priceToY(mag.priceLevel)),
+        );
+        ctx.strokeStyle = colAmber;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 4]);
+        ctx.beginPath();
+        ctx.moveTo(this.padLeft, my);
+        ctx.lineTo(width - this.padRight, my);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        const mLabel = `🧲 ${mag.tier} ${mag.side === "SHORT_LIQ_MAGNET" ? "SHORT LIQ" : "LONG LIQ"} $${mag.priceLevel.toLocaleString()} ($${(mag.estimatedPoolUsd / 1e6).toFixed(1)}M)`;
+        ctx.font = "bold 9px monospace";
+        const mtw = ctx.measureText(mLabel).width + 8;
+        ctx.fillStyle = "rgba(44, 36, 18, 0.92)";
+        ctx.fillRect(this.padLeft + 10, my - 7, mtw, 13);
+        ctx.fillStyle = colAmber;
+        ctx.textAlign = "left";
+        ctx.fillText(mLabel, this.padLeft + 14, my + 2);
       }
     }
 

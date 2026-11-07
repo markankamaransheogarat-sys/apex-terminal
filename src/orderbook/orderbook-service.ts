@@ -70,6 +70,23 @@ export interface MultiAssetWallSummary {
   regime: L2OrderbookSnapshot["regime"];
 }
 
+export type WallIntegrityStatus =
+  "VERIFIED_FORTRESS" | "ICEBERG_RELOADED" | "ACTIVE_CLUSTER" | "SPOOF_PULLED";
+
+export interface SpoofWallEvent {
+  id: string;
+  symbol: string;
+  asset: string;
+  side: "BID" | "ASK";
+  priceBucket: number;
+  peakNotionalUsd: number;
+  currentNotionalUsd: number;
+  dropPercent: number;
+  status: WallIntegrityStatus;
+  ageSeconds: number;
+  timestamp: number;
+}
+
 export interface CapitalClusterZone {
   side: "BID" | "ASK";
   priceBucket: number;
@@ -83,6 +100,8 @@ export interface CapitalClusterZone {
   wallMultiple: number;
   isWhaleCluster: boolean;
   levelsMerged: number;
+  wallStatus: WallIntegrityStatus;
+  persistenceScore: number; // 0-100 institutional wall conviction score
 }
 
 export interface GroupedOrderbookView {
@@ -95,6 +114,18 @@ export interface GroupedOrderbookView {
   totalBidCapitalUsd: number;
   totalAskCapitalUsd: number;
   bidAskRatio: number;
+  spoofAndIntegrityEvents: SpoofWallEvent[];
+}
+
+interface TrackedWallState {
+  firstSeenMs: number;
+  lastSeenMs: number;
+  peakNotionalUsd: number;
+  lastNotionalUsd: number;
+  snapshotsSeen: number;
+  reloadCount: number;
+  side: "BID" | "ASK";
+  priceBucket: number;
 }
 
 export class OrderbookService {
@@ -107,6 +138,8 @@ export class OrderbookService {
     "XRPUSDT",
     "DOGEUSDT",
   ];
+  private static wallMemory: Map<string, TrackedWallState> = new Map();
+  private static spoofEventsLog: Map<string, SpoofWallEvent[]> = new Map();
 
   private symbol: string = "BTCUSDT";
   private ws: WebSocket | null = null;
@@ -446,12 +479,124 @@ export class OrderbookService {
           allBucketNotionals.length
         : 1;
 
+    const nowMs = Date.now();
+    const symEvents = OrderbookService.spoofEventsLog.get(snap.symbol) || [];
+
+    const evaluateWallIntegrity = (
+      side: "BID" | "ASK",
+      priceBucket: number,
+      notionalUsd: number,
+      mult: number,
+    ): { status: WallIntegrityStatus; persistenceScore: number } => {
+      const memKey = `${snap.symbol}:${step}:${side}:${priceBucket}`;
+      const existing = OrderbookService.wallMemory.get(memKey);
+
+      if (!existing) {
+        if (mult >= 1.8) {
+          OrderbookService.wallMemory.set(memKey, {
+            firstSeenMs: nowMs,
+            lastSeenMs: nowMs,
+            peakNotionalUsd: notionalUsd,
+            lastNotionalUsd: notionalUsd,
+            snapshotsSeen: 1,
+            reloadCount: 0,
+            side,
+            priceBucket,
+          });
+        }
+        return {
+          status: mult >= 2.6 ? "VERIFIED_FORTRESS" : "ACTIVE_CLUSTER",
+          persistenceScore: Math.min(95, Math.round(55 + mult * 10)),
+        };
+      }
+
+      existing.lastSeenMs = nowMs;
+      existing.snapshotsSeen += 1;
+
+      if (notionalUsd > existing.lastNotionalUsd * 1.18 && mult >= 2.0) {
+        existing.reloadCount += 1;
+      }
+      if (notionalUsd > existing.peakNotionalUsd) {
+        existing.peakNotionalUsd = notionalUsd;
+      }
+
+      const dropRatio =
+        existing.peakNotionalUsd > 0
+          ? (existing.peakNotionalUsd - notionalUsd) / existing.peakNotionalUsd
+          : 0;
+      const priceDidNotCross =
+        side === "BID"
+          ? snap.midPrice > priceBucket
+          : snap.midPrice < priceBucket;
+
+      let status: WallIntegrityStatus = "ACTIVE_CLUSTER";
+      if (
+        existing.peakNotionalUsd >= meanBucketUsd * 2.1 &&
+        dropRatio >= 0.55 &&
+        priceDidNotCross
+      ) {
+        status = "SPOOF_PULLED";
+        const dropPct = Math.round(dropRatio * 100);
+        const dup = symEvents.find(
+          (e) =>
+            e.priceBucket === priceBucket &&
+            e.side === side &&
+            nowMs - e.timestamp < 30_000,
+        );
+        if (!dup) {
+          symEvents.unshift({
+            id: `spf-${nowMs}-${priceBucket}`,
+            symbol: snap.symbol,
+            asset: snap.asset,
+            side,
+            priceBucket,
+            peakNotionalUsd: existing.peakNotionalUsd,
+            currentNotionalUsd: notionalUsd,
+            dropPercent: dropPct,
+            status: "SPOOF_PULLED",
+            ageSeconds: Math.max(
+              1,
+              Math.round((nowMs - existing.firstSeenMs) / 1000),
+            ),
+            timestamp: nowMs,
+          });
+        }
+      } else if (existing.reloadCount >= 1 && mult >= 2.0) {
+        status = "ICEBERG_RELOADED";
+      } else if (existing.snapshotsSeen >= 3 || mult >= 2.5) {
+        status = "VERIFIED_FORTRESS";
+      }
+
+      existing.lastNotionalUsd = notionalUsd;
+      const ageSec = Math.max(1, (nowMs - existing.firstSeenMs) / 1000);
+      const persistenceScore =
+        status === "SPOOF_PULLED"
+          ? Math.max(10, Math.round(100 - dropRatio * 100))
+          : Math.min(
+              99,
+              Math.round(
+                60 +
+                  Math.min(20, ageSec * 0.5) +
+                  existing.reloadCount * 8 +
+                  Math.min(15, mult * 3),
+              ),
+            );
+
+      return { status, persistenceScore };
+    };
+
     let cumBid = 0;
     const groupedBids: CapitalClusterZone[] = Array.from(bidMap.entries())
       .sort((a, b) => b[0] - a[0])
       .map(([priceBucket, info]) => {
         cumBid += info.notional;
         const mult = meanBucketUsd > 0 ? info.notional / meanBucketUsd : 1;
+        const integrity = evaluateWallIntegrity(
+          "BID",
+          priceBucket,
+          info.notional,
+          mult,
+        );
         return {
           side: "BID" as const,
           priceBucket,
@@ -471,6 +616,8 @@ export class OrderbookService {
           wallMultiple: mult,
           isWhaleCluster: mult >= 2.0,
           levelsMerged: info.count,
+          wallStatus: integrity.status,
+          persistenceScore: integrity.persistenceScore,
         };
       });
 
@@ -480,6 +627,12 @@ export class OrderbookService {
       .map(([priceBucket, info]) => {
         cumAsk += info.notional;
         const mult = meanBucketUsd > 0 ? info.notional / meanBucketUsd : 1;
+        const integrity = evaluateWallIntegrity(
+          "ASK",
+          priceBucket,
+          info.notional,
+          mult,
+        );
         return {
           side: "ASK" as const,
           priceBucket,
@@ -499,6 +652,8 @@ export class OrderbookService {
           wallMultiple: mult,
           isWhaleCluster: mult >= 2.0,
           levelsMerged: info.count,
+          wallStatus: integrity.status,
+          persistenceScore: integrity.persistenceScore,
         };
       });
 
@@ -521,6 +676,36 @@ export class OrderbookService {
       .sort((a, b) => b.notionalUsd - a.notionalUsd)
       .slice(0, 4);
 
+    // Ensure top verified walls are also visible in the integrity feed if no spoofs yet
+    const combinedEvents: SpoofWallEvent[] = [...symEvents.slice(0, 6)];
+    if (combinedEvents.length < 4) {
+      for (const c of [
+        ...topBidClusters.slice(0, 2),
+        ...topAskClusters.slice(0, 2),
+      ]) {
+        if (
+          !combinedEvents.some(
+            (e) => e.priceBucket === c.priceBucket && e.side === c.side,
+          )
+        ) {
+          combinedEvents.push({
+            id: `ver-${c.side}-${c.priceBucket}`,
+            symbol: snap.symbol,
+            asset: snap.asset,
+            side: c.side,
+            priceBucket: c.priceBucket,
+            peakNotionalUsd: c.notionalUsd,
+            currentNotionalUsd: c.notionalUsd,
+            dropPercent: 0,
+            status: c.wallStatus,
+            ageSeconds: 45,
+            timestamp: nowMs,
+          });
+        }
+      }
+    }
+    OrderbookService.spoofEventsLog.set(snap.symbol, symEvents.slice(0, 12));
+
     return {
       bucketStepUsd: step,
       availableBuckets,
@@ -532,6 +717,7 @@ export class OrderbookService {
       totalAskCapitalUsd,
       bidAskRatio:
         totalAskCapitalUsd > 0 ? totalBidCapitalUsd / totalAskCapitalUsd : 1,
+      spoofAndIntegrityEvents: combinedEvents.slice(0, 6),
     };
   }
 

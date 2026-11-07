@@ -929,7 +929,8 @@ class ApexWebTerminal {
             <div class="chart-group">
               <span class="returns-badge badge-live">● VWAP: ON</span>
               <span class="returns-badge badge-live">● POC PROFILE: ON</span>
-              <span class="returns-badge badge-live">● 🐋 WHALE CAMPAIGN VWAP &amp; FOOTPRINTS: ON</span>
+              <span class="returns-badge badge-live">● 🐋 WHALE CAMPAIGN VWAP: ON</span>
+              <span class="returns-badge badge-live">● 🧱 L2 WALLS &amp; 50X-100X LIQ HEATMAP: ON</span>
             </div>
           </div>
 
@@ -955,6 +956,7 @@ class ApexWebTerminal {
       showVolumeProfile: true,
       showGrid: true,
       showWhaleOverlay: true,
+      showLiquidityHeatmap: true,
     });
 
     this.chartRenderer.resize();
@@ -963,6 +965,28 @@ class ApexWebTerminal {
     this.chartRenderer.setWhaleOverlay(
       this.whaleStream.getTrancheCampaigns(),
       this.whaleStream.getWhaleTrades(),
+    );
+
+    const curSym = this.chartService.getSymbol();
+    const obSnap = this.orderbookService.getSnapshotForSymbol(curSym);
+    const curPrice =
+      data.candles[data.candles.length - 1]?.close ||
+      this.tickers.get(curSym)?.price ||
+      85000;
+    const magnets = QuantExecutionCalculator.calculateLiquidationMagnets(
+      curSym,
+      curPrice,
+      2_500_000_000,
+      0.0001,
+      data.candles,
+    );
+    const grouped = obSnap
+      ? OrderbookService.groupOrderbookByBucket(obSnap, 0)
+      : null;
+    this.chartRenderer.setLiquidityHeatmapOverlay(
+      grouped ? grouped.topBidClusters : [],
+      grouped ? grouped.topAskClusters : [],
+      [...magnets.upperShortSqueezePools, ...magnets.lowerLongFlushPools],
     );
 
     window.addEventListener("resize", () => {
@@ -1179,7 +1203,7 @@ class ApexWebTerminal {
                     (c, idx) => `
                   <div style="background: rgba(10, 15, 29, 0.85); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 5px; padding: 8px 10px;">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
-                      <span style="font-size: 10px; color: var(--text-muted); font-weight: 700;">#${idx + 1} ЗОНА ПОКУПОК</span>
+                      <span style="font-size: 10px; color: var(--text-muted); font-weight: 700;">#${idx + 1} ЗОНА ПОКУПОК · ${c.wallStatus === "SPOOF_PULLED" ? "🎭 SPOOF" : c.wallStatus === "ICEBERG_RELOADED" ? "🧊 ICEBERG" : "🛡️ VERIFIED"} (${c.persistenceScore}%)</span>
                       <span class="regime-badge regime-squeeze">${c.shareOfSidePercent.toFixed(1)}% КНИГИ</span>
                     </div>
                     <div style="font-size: 15px; font-weight: 800; color: var(--green); margin: 3px 0;">
@@ -1206,7 +1230,7 @@ class ApexWebTerminal {
                     (c, idx) => `
                   <div style="background: rgba(10, 15, 29, 0.85); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 5px; padding: 8px 10px;">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
-                      <span style="font-size: 10px; color: var(--text-muted); font-weight: 700;">#${idx + 1} ЗОНА ПРОДАЖ</span>
+                      <span style="font-size: 10px; color: var(--text-muted); font-weight: 700;">#${idx + 1} ЗОНА ПРОДАЖ · ${c.wallStatus === "SPOOF_PULLED" ? "🎭 SPOOF" : c.wallStatus === "ICEBERG_RELOADED" ? "🧊 ICEBERG" : "🛡️ VERIFIED"} (${c.persistenceScore}%)</span>
                       <span class="regime-badge regime-extreme">${c.shareOfSidePercent.toFixed(1)}% КНИГИ</span>
                     </div>
                     <div style="font-size: 15px; font-weight: 800; color: var(--red); margin: 3px 0;">
@@ -3049,8 +3073,11 @@ class ApexWebTerminal {
           <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 16px;">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
               <span style="font-weight: 700; color: var(--amber-bright); letter-spacing: 0.06em;">🎯 INSTITUTIONAL EXECUTION TICKET (${sym})</span>
-              <div style="display: flex; gap: 8px; align-items: center;">
+              <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
                 <span class="badge ${this.execDirection === "LONG" ? "badge-green" : "badge-red"}">${this.execDirection} ${setup.recommendedLeverage}x</span>
+                <button id="btn-exec-telegram-ticket" class="terminal-btn-sm" title="Send formatted Institutional Order Ticket to Telegram &amp; copy to clipboard">
+                  📤 SEND TO TELEGRAM / COPY
+                </button>
                 <button id="btn-exec-open-position" class="btn-go" style="padding: 5px 12px; font-size: 11px;">
                   ⚡ EXECUTE 1R TICKET
                 </button>
@@ -3287,6 +3314,21 @@ class ApexWebTerminal {
         playCommandGo();
         this.executionBlotter.openPositionFromSetup(setup);
         this.renderExecScreen(container);
+      });
+
+    document
+      .getElementById("btn-exec-telegram-ticket")
+      ?.addEventListener("click", (e) => {
+        playCommandGo();
+        const btn = e.currentTarget as HTMLButtonElement;
+        this.alertManager.dispatchTradeSetupTicket(setup).then((res) => {
+          btn.textContent = res.telegramSent
+            ? "✅ SENT TO TELEGRAM & COPIED"
+            : "✅ COPIED TICKET TO CLIPBOARD";
+          setTimeout(() => {
+            btn.textContent = "📤 SEND TO TELEGRAM / COPY";
+          }, 2600);
+        });
       });
 
     container.querySelectorAll(".btn-pos-be").forEach((btn) => {
@@ -3541,6 +3583,10 @@ class ApexWebTerminal {
     const statArbRows = WorldClassQuantService.computeStatArbMatrix(
       this.returnsService.getReturns(),
       this.tickers,
+    );
+    const backtestReport = WorldClassQuantService.computeWalkForwardBacktest(
+      this.returnsService.getReturns(),
+      this.execBalanceUsd,
     );
     const macroLiq = this.quantEngine.getMacroLiquidity();
 
@@ -3847,6 +3893,94 @@ class ApexWebTerminal {
                 )
                 .join("")}
             </div>
+          </div>
+        </div>
+
+        <!-- SECTION 4: 60-DAY WALK-FORWARD STRATEGY BACKTESTER (SHARPE, SORTINO, PROFIT FACTOR & EQUITY CURVE) -->
+        <div class="mt-3" style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 14px 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; border-bottom: 1px solid var(--border-subtle); padding-bottom: 8px;">
+            <div>
+              <span style="font-size: 12px; font-weight: 800; color: var(--green); letter-spacing: 0.06em;">
+                🧪 4. 60-DAY WALK-FORWARD STRATEGY BACKTESTER (${backtestReport.strategyName})
+              </span>
+              <span style="font-size: 11px; color: var(--text-muted); margin-left: 8px;">
+                Out-of-sample симуляция на реальных 60-дневных доходностях с защитой стоп-лосса за L2-плитой и Half-Kelly контролем риска
+              </span>
+            </div>
+            <span class="returns-badge badge-live">● ${backtestReport.totalTrades} SIMULATED TRADES (${backtestReport.periodDays}D)</span>
+          </div>
+
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 10px; margin-bottom: 12px;">
+            <div style="background: rgba(10, 15, 29, 0.85); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
+              <div style="font-size: 10px; color: var(--text-muted);">STRATEGY NET RETURN</div>
+              <div style="font-size: 16px; font-weight: 800;" class="${backtestReport.totalReturnPercent >= 0 ? "text-green" : "text-red"}">
+                ${backtestReport.totalReturnPercent >= 0 ? "+" : ""}${backtestReport.totalReturnPercent.toFixed(2)}%
+              </div>
+              <div style="font-size: 10px; color: var(--text-secondary);">
+                $${Math.round(backtestReport.startingEquityUsd).toLocaleString()} &rarr; <strong>$${Math.round(backtestReport.endingEquityUsd).toLocaleString()}</strong>
+              </div>
+            </div>
+
+            <div style="background: rgba(10, 15, 29, 0.85); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
+              <div style="font-size: 10px; color: var(--text-muted);">ALPHA VS BTC BENCHMARK</div>
+              <div style="font-size: 16px; font-weight: 800;" class="${backtestReport.alphaOutperformancePercent >= 0 ? "text-green" : "text-red"}">
+                ${backtestReport.alphaOutperformancePercent >= 0 ? "+" : ""}${backtestReport.alphaOutperformancePercent.toFixed(2)}%
+              </div>
+              <div style="font-size: 10px; color: var(--text-secondary);">
+                BTC Buy &amp; Hold: ${backtestReport.benchmarkBtcReturnPercent >= 0 ? "+" : ""}${backtestReport.benchmarkBtcReturnPercent.toFixed(2)}%
+              </div>
+            </div>
+
+            <div style="background: rgba(10, 15, 29, 0.85); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
+              <div style="font-size: 10px; color: var(--text-muted);">SHARPE / SORTINO RATIO</div>
+              <div style="font-size: 16px; font-weight: 800; color: var(--amber-bright);">
+                ${backtestReport.sharpeRatio.toFixed(2)} / ${backtestReport.sortinoRatio.toFixed(2)}
+              </div>
+              <div style="font-size: 10px; color: var(--text-secondary);">Annualized Risk-Adjusted</div>
+            </div>
+
+            <div style="background: rgba(10, 15, 29, 0.85); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
+              <div style="font-size: 10px; color: var(--text-muted);">WIN RATE &amp; PROFIT FACTOR</div>
+              <div style="font-size: 16px; font-weight: 800; color: var(--green);">
+                ${backtestReport.winRatePercent.toFixed(1)}% · PF ${backtestReport.profitFactor.toFixed(2)}
+              </div>
+              <div style="font-size: 10px; color: var(--text-secondary);">${backtestReport.totalTrades} total executions</div>
+            </div>
+
+            <div style="background: rgba(10, 15, 29, 0.85); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 8px 10px;">
+              <div style="font-size: 10px; color: var(--text-muted);">MAX DRAWDOWN (L2 SHIELD)</div>
+              <div style="font-size: 16px; font-weight: 800; color: var(--red);">
+                -${backtestReport.maxDrawdownPercent.toFixed(2)}%
+              </div>
+              <div style="font-size: 10px; color: var(--text-secondary);">Tail-Risk Capped at -1.8%/trade</div>
+            </div>
+          </div>
+
+          <!-- ASCII / CSS Sparkline Equity Curve Bar Strip -->
+          <div style="display: flex; align-items: flex-end; gap: 3px; height: 46px; background: rgba(10, 15, 29, 0.7); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 6px 8px;">
+            ${(() => {
+              const pts = backtestReport.equityCurve.slice(-40);
+              const minEq = Math.min(...pts.map((p) => p.strategyEquity));
+              const maxEq = Math.max(
+                ...pts.map((p) => p.strategyEquity),
+                minEq + 1,
+              );
+              return pts
+                .map((p, i) => {
+                  const prev =
+                    i > 0 ? pts[i - 1]!.strategyEquity : p.strategyEquity;
+                  const hPct = Math.max(
+                    15,
+                    Math.round(
+                      ((p.strategyEquity - minEq) / (maxEq - minEq)) * 100,
+                    ),
+                  );
+                  const col =
+                    p.strategyEquity >= prev ? "var(--green)" : "var(--red)";
+                  return `<div title="Day ${p.day}: Strategy $${p.strategyEquity.toLocaleString()} vs BTC $${p.btcBenchmarkEquity.toLocaleString()}" style="flex: 1; height: ${hPct}%; background: ${col}; border-radius: 2px 2px 0 0; opacity: 0.85;"></div>`;
+                })
+                .join("");
+            })()}
           </div>
         </div>
       </div>

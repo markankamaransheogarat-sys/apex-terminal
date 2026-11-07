@@ -202,4 +202,37 @@ describe("WorldClassQuantService - Spot vs Perp CVD, Coinbase Premium, StatArb &
         btc.grade === "A+ INSTITUTIONAL LONG",
     );
   });
+
+  it("computes 60-Day Walk-Forward Backtest with Sharpe, Sortino, Profit Factor & Equity Curve", () => {
+    const returnsMap: Record<string, number[]> = {
+      BTC: [],
+      ETH: [],
+      SOL: [],
+      BNB: [],
+      SUI: [],
+      XRP: [],
+      DOGE: [],
+    };
+    for (let i = 0; i < 60; i++) {
+      const r = Math.sin(i * 0.25) * 0.022 + 0.003;
+      returnsMap.BTC!.push(r);
+      returnsMap.ETH!.push(r * 1.15);
+      returnsMap.SOL!.push(r * 1.35);
+      returnsMap.BNB!.push(r * 0.9);
+      returnsMap.SUI!.push(r * 1.4);
+      returnsMap.XRP!.push(r * 0.95);
+      returnsMap.DOGE!.push(r * 1.2);
+    }
+
+    const report = WorldClassQuantService.computeWalkForwardBacktest(
+      returnsMap,
+      10_000,
+    );
+    assert.equal(report.startingEquityUsd, 10_000);
+    assert.ok(report.endingEquityUsd > 10_000);
+    assert.ok(report.totalTrades > 10);
+    assert.ok(report.winRatePercent > 40);
+    assert.ok(report.profitFactor > 1.0);
+    assert.ok(report.equityCurve.length > 20);
+  });
 });
