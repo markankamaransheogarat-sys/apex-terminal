@@ -51,7 +51,11 @@ import {
 
 // New Institutional Modules
 import { ChartService } from "../chart/chart-service.js";
-import { CanvasChartRenderer } from "../chart/canvas-renderer.js";
+import {
+  CanvasChartRenderer,
+  ChartRenderOptions,
+  ChartVisualMode,
+} from "../chart/canvas-renderer.js";
 import { ChartTimeframe } from "../chart/types.js";
 import { BasisArbitrageCalculator } from "../arbitrage/basis-calculator.js";
 import { NewsService } from "../news/news-service.js";
@@ -74,6 +78,18 @@ class ApexWebTerminal {
   // Additional Subsystems
   private chartService: ChartService;
   private chartRenderer: CanvasChartRenderer | null = null;
+  private chartOptions: ChartRenderOptions = {
+    visualMode: "CANDLES",
+    showVWAP: true,
+    showVwapBands: true,
+    showEmaRibbon: true,
+    showVolumeProfile: true,
+    showGrid: true,
+    showWhaleOverlay: true,
+    showLiquidityHeatmap: true,
+    showTradeSetupBox: true,
+    showCvdCurve: true,
+  };
   private orderbookService: OrderbookService;
   private orderbookBucketStep: number = 0;
   private alphaTracker: AlphaPerformanceTracker;
@@ -887,55 +903,100 @@ class ApexWebTerminal {
     const curTF = this.chartService.getTimeframe();
     const symbols = ["BTC", "ETH", "SOL", "BNB", "SUI", "XRP", "DOGE"];
     const timeframes: ChartTimeframe[] = ["1m", "5m", "15m", "1h", "1d"];
+    const modes: { id: ChartVisualMode; label: string }[] = [
+      { id: "CANDLES", label: "🕯️ CANDLES" },
+      { id: "HEIKIN_ASHI", label: "🌊 HEIKIN-ASHI" },
+      { id: "AREA", label: "📈 AREA" },
+    ];
 
     container.innerHTML = `
       <div class="terminal-screen screen-chart">
         <div class="screen-header">
           <div class="screen-title-group">
-            <h2 class="screen-title">📈 HIGH-FREQUENCY REAL-TIME CANDLESTICK &amp; VWAP ENGINE</h2>
-            <span class="screen-subtitle">60 FPS ZERO-DEPENDENCY HTML5 CANVAS WITH INSTITUTIONAL VOLUME PROFILE (POC)</span>
+            <h2 class="screen-title">📈 HIGH-FREQUENCY PRO ORDERFLOW &amp; QUANT CHARTING SUITE</h2>
+            <span class="screen-subtitle">60 FPS HTML5 CANVAS • WHEEL ZOOM &amp; DRAG PAN • VWAP ±1.5σ • EMA 20/50 RIBBON • L2 &amp; LIQ HEATMAP • TP/SL R:R BOX • CVD SUB-PANE</span>
           </div>
-          <span class="terminal-badge badge-aladdin">SUB-MILLISECOND RENDER</span>
+          <span class="terminal-badge badge-aladdin">PRO SUITE v5.0</span>
         </div>
 
         <div class="chart-container-box">
-          <div class="chart-toolbar">
-            <div class="chart-group">
-              <span class="selector-label">SYMBOL:</span>
-              ${symbols
-                .map(
-                  (s) => `
-                <button class="chart-btn ${curSymbol.startsWith(s) ? "active" : ""}" data-chart-sym="${s}USDT">
-                  ${s}
-                </button>
-              `,
-                )
-                .join("")}
+          <div class="chart-toolbar" style="flex-wrap: wrap; gap: 8px; justify-content: space-between;">
+            <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+              <div class="chart-group">
+                <span class="selector-label">ASSET:</span>
+                ${symbols
+                  .map(
+                    (s) => `
+                  <button class="chart-btn ${curSymbol.startsWith(s) ? "active" : ""}" data-chart-sym="${s}USDT">
+                    ${s}
+                  </button>
+                `,
+                  )
+                  .join("")}
+              </div>
+
+              <div class="chart-group">
+                <span class="selector-label">TF:</span>
+                ${timeframes
+                  .map(
+                    (tf) => `
+                  <button class="chart-btn ${curTF === tf ? "active" : ""}" data-chart-tf="${tf}">
+                    ${tf.toUpperCase()}
+                  </button>
+                `,
+                  )
+                  .join("")}
+              </div>
+
+              <div class="chart-group">
+                <span class="selector-label">STYLE:</span>
+                ${modes
+                  .map(
+                    (m) => `
+                  <button class="chart-btn ${this.chartOptions.visualMode === m.id ? "active" : ""}" data-chart-mode="${m.id}">
+                    ${m.label}
+                  </button>
+                `,
+                  )
+                  .join("")}
+              </div>
+
+              <div class="chart-group">
+                <span class="selector-label">ZOOM:</span>
+                <button class="chart-btn" id="btn-chart-zoom-in" title="Zoom In (Mouse Wheel Up)">🔍 +</button>
+                <button class="chart-btn" id="btn-chart-zoom-out" title="Zoom Out (Mouse Wheel Down)">🔍 −</button>
+                <button class="chart-btn" id="btn-chart-reset" title="Reset Zoom &amp; Pan">↺ RESET</button>
+              </div>
             </div>
 
-            <div class="chart-group">
-              <span class="selector-label">TIMEFRAME:</span>
-              ${timeframes
-                .map(
-                  (tf) => `
-                <button class="chart-btn ${curTF === tf ? "active" : ""}" data-chart-tf="${tf}">
-                  ${tf.toUpperCase()}
-                </button>
-              `,
-                )
-                .join("")}
-            </div>
-
-            <div class="chart-group">
-              <span class="returns-badge badge-live">● VWAP: ON</span>
-              <span class="returns-badge badge-live">● POC PROFILE: ON</span>
-              <span class="returns-badge badge-live">● 🐋 WHALE CAMPAIGN VWAP: ON</span>
-              <span class="returns-badge badge-live">● 🧱 L2 WALLS &amp; 50X-100X LIQ HEATMAP: ON</span>
+            <div class="chart-group" style="flex-wrap: wrap; gap: 4px;">
+              <span class="selector-label">LAYERS:</span>
+              <button class="chart-btn ${this.chartOptions.showVWAP ? "active" : ""}" data-chart-toggle="showVWAP" title="Toggle Session VWAP &amp; ±1.5σ Bands">
+                📊 VWAP ±1.5σ
+              </button>
+              <button class="chart-btn ${this.chartOptions.showEmaRibbon ? "active" : ""}" data-chart-toggle="showEmaRibbon" title="Toggle EMA 20 / EMA 50 Trend Ribbon Cloud">
+                📈 EMA 20/50
+              </button>
+              <button class="chart-btn ${this.chartOptions.showLiquidityHeatmap ? "active" : ""}" data-chart-toggle="showLiquidityHeatmap" title="Toggle Bookmap L2 Capital Walls &amp; 50x-100x Liquidation Pools">
+                🧱 L2 &amp; LIQ HEATMAP
+              </button>
+              <button class="chart-btn ${this.chartOptions.showTradeSetupBox ? "active" : ""}" data-chart-toggle="showTradeSetupBox" title="Toggle TradingView-style Long/Short R:R Position Box from EXEC <GO>">
+                🎯 TP/SL R:R BOX
+              </button>
+              <button class="chart-btn ${this.chartOptions.showWhaleOverlay ? "active" : ""}" data-chart-toggle="showWhaleOverlay" title="Toggle Whale Iceberg Campaign VWAP Lines &amp; Block Prints">
+                🐋 WHALES
+              </button>
+              <button class="chart-btn ${this.chartOptions.showVolumeProfile ? "active" : ""}" data-chart-toggle="showVolumeProfile" title="Toggle Volume Profile &amp; Point of Control (POC)">
+                📊 POC PROFILE
+              </button>
+              <button class="chart-btn ${this.chartOptions.showCvdCurve ? "active" : ""}" data-chart-toggle="showCvdCurve" title="Toggle Sub-Pane Cumulative Volume Delta (CVD) Curve">
+                ⚡ CVD CURVE
+              </button>
             </div>
           </div>
 
           <div class="chart-canvas-wrap">
-            <canvas id="apex-chart-canvas" class="chart-canvas"></canvas>
+            <canvas id="apex-chart-canvas" class="chart-canvas" style="cursor: crosshair;"></canvas>
           </div>
         </div>
       </div>
@@ -951,13 +1012,7 @@ class ApexWebTerminal {
     ) as HTMLCanvasElement;
     if (!canvas) return;
 
-    this.chartRenderer = new CanvasChartRenderer(canvas, {
-      showVWAP: true,
-      showVolumeProfile: true,
-      showGrid: true,
-      showWhaleOverlay: true,
-      showLiquidityHeatmap: true,
-    });
+    this.chartRenderer = new CanvasChartRenderer(canvas, this.chartOptions);
 
     this.chartRenderer.resize();
     const data = this.chartService.buildChartData();
@@ -988,6 +1043,19 @@ class ApexWebTerminal {
       grouped ? grouped.topAskClusters : [],
       [...magnets.upperShortSqueezePools, ...magnets.lowerLongFlushPools],
     );
+
+    const tradeSetup = QuantExecutionCalculator.calculateTradeSetup({
+      symbol: curSym,
+      direction: this.execDirection,
+      accountBalanceUsd: this.execBalanceUsd,
+      riskPercent: this.execRiskPercent,
+      currentPrice: curPrice,
+      candles: data.candles,
+      orderbook: obSnap,
+      whaleCampaigns: this.whaleStream.getTrancheCampaigns(),
+      magnetMap: magnets,
+    });
+    this.chartRenderer.setTradeSetupOverlay(tradeSetup);
 
     window.addEventListener("resize", () => {
       this.chartRenderer?.resize();
@@ -1026,6 +1094,56 @@ class ApexWebTerminal {
         }
       });
     });
+
+    document.querySelectorAll("[data-chart-mode]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const mode = (e.currentTarget as HTMLElement).getAttribute(
+          "data-chart-mode",
+        ) as ChartVisualMode | null;
+        if (mode) {
+          playTerminalKey();
+          this.chartOptions.visualMode = mode;
+          this.render();
+        }
+      });
+    });
+
+    document.querySelectorAll("[data-chart-toggle]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        const key = (e.currentTarget as HTMLElement).getAttribute(
+          "data-chart-toggle",
+        ) as keyof ChartRenderOptions | null;
+        if (key && typeof this.chartOptions[key] === "boolean") {
+          playTerminalKey();
+          (this.chartOptions as any)[key] = !this.chartOptions[key];
+          if (key === "showVWAP") {
+            this.chartOptions.showVwapBands = this.chartOptions.showVWAP;
+          }
+          this.render();
+        }
+      });
+    });
+
+    document
+      .getElementById("btn-chart-zoom-in")
+      ?.addEventListener("click", () => {
+        playTerminalKey();
+        this.chartRenderer?.zoom(-14);
+      });
+
+    document
+      .getElementById("btn-chart-zoom-out")
+      ?.addEventListener("click", () => {
+        playTerminalKey();
+        this.chartRenderer?.zoom(14);
+      });
+
+    document
+      .getElementById("btn-chart-reset")
+      ?.addEventListener("click", () => {
+        playCommandGo();
+        this.chartRenderer?.resetView();
+      });
   }
 
   // ==========================================
