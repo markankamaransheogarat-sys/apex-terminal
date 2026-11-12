@@ -124,6 +124,7 @@ export class WorldClassQuantService {
     "ETHUSDT",
     "SOLUSDT",
     "BNBUSDT",
+    "AVAXUSDT",
     "SUIUSDT",
     "XRPUSDT",
     "DOGEUSDT",

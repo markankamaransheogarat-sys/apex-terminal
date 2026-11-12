@@ -8176,6 +8176,7 @@ var WorldClassQuantService = class _WorldClassQuantService {
     "ETHUSDT",
     "SOLUSDT",
     "BNBUSDT",
+    "AVAXUSDT",
     "SUIUSDT",
     "XRPUSDT",
     "DOGEUSDT"

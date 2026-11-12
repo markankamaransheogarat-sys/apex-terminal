@@ -192,7 +192,7 @@ describe("WorldClassQuantService - Spot vs Perp CVD, Coinbase Premium, StatArb &
       ethOptions: deriv.getOptionsSnapshot("ETH"),
     });
 
-    assert.equal(rows.length, 7);
+    assert.equal(rows.length, 8);
     const btc = rows.find((r) => r.asset === "BTC")!;
     assert.ok(btc);
     assert.ok(btc.masterScore > 30);
