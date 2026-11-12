@@ -9525,14 +9525,22 @@ var ApexWebTerminal = class {
       this.onChainService.fetchOpenInterest(this.prevPrices);
       this.newsService.fetchLatestNews().then((s) => this.newsSnapshot = s);
       this.derivService.fetchLiveDeribitOptions().then(() => {
-        if (this.activeScreen === "DERIV" || this.activeScreen === "QUANT")
+        if (this.activeScreen === "DERIV" || this.activeScreen === "QUANT" || this.activeScreen === "RADAR")
           this.render();
       });
-      this.quantEngine.fetchLiveSpotVsPerpFlows(this.tickers).catch(() => {
+      this.quantEngine.fetchLiveSpotVsPerpFlows(this.tickers).then(() => {
+        if (this.activeScreen === "RADAR" || this.activeScreen === "QUANT") {
+          this.render();
+        }
+      }).catch(() => {
       });
       this.quantEngine.fetchDeFiLlamaMacroLiquidity().catch(() => {
       });
-      this.orderbookService.scanMultiAssetWalls().catch(() => {
+      this.orderbookService.scanMultiAssetWalls().then(() => {
+        if (this.activeScreen === "RADAR") {
+          this.render();
+        }
+      }).catch(() => {
       });
     }, 45e3);
   }
