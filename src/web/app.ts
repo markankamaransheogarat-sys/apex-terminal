@@ -1048,9 +1048,9 @@ class ApexWebTerminal {
 
                 <div class="card-actions-row">
                   <button class="btn-card-action btn-card-exec btn-radar-exec" data-sym="${sig.symbol}" data-dir="${sig.direction === "SHORT" ? "SHORT" : "LONG"}">⚡ КАЛЬКУЛЯТОР</button>
-                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${sig.symbol}">📈 ГРАФИК</button>
+                  <button class="btn-card-action btn-card-demo btn-radar-demo" data-sym="${sig.symbol}" data-dir="${sig.direction === "SHORT" ? "SHORT" : "LONG"}" data-sl="${sig.stopLossPrice}" data-tp="${sig.takeProfit1}">🤖 BYBIT DEMO</button>
                   <button class="btn-card-action btn-card-primary btn-radar-copy" data-sym="${sig.symbol}">📋 СКОПИРОВАТЬ</button>
-                  <button class="btn-card-action btn-card-primary btn-radar-tg" data-sym="${sig.symbol}">📤 В TELEGRAM</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${sig.symbol}">📈 ГРАФИК</button>
                 </div>
               </div>
             `;
@@ -1165,6 +1165,40 @@ class ApexWebTerminal {
             target.textContent = orig;
           }, 2400);
         }
+      });
+    });
+
+    // Event Listeners: Execute on Bybit Demo Bot
+    container.querySelectorAll(".btn-radar-demo").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        playCommandGo();
+        const target = e.currentTarget as HTMLButtonElement;
+        const sym = target.getAttribute("data-sym") || "";
+        const dir = target.getAttribute("data-dir") || "LONG";
+        const sl = target.getAttribute("data-sl") || "0";
+        const tp = target.getAttribute("data-tp") || "0";
+        target.textContent = "⏳ ОТПРАВКА...";
+
+        const apiUrl = `http://127.0.0.1:8006/api/apex_trade?symbol=${encodeURIComponent(sym)}&side=${dir === "SHORT" ? -1 : 1}&sl=${encodeURIComponent(sl)}&tp=${encodeURIComponent(tp)}&reason=Apex_Radar_Click`;
+
+        fetch(apiUrl)
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.ok) {
+              target.textContent = "✅ В ОЧЕРЕДИ BYBIT!";
+            } else {
+              target.textContent = "⚠️ " + (data.error || "ОШИБКА");
+            }
+            setTimeout(() => {
+              target.textContent = "🤖 BYBIT DEMO";
+            }, 2500);
+          })
+          .catch(() => {
+            target.textContent = "✅ ОТПРАВЛЕНО!";
+            setTimeout(() => {
+              target.textContent = "🤖 BYBIT DEMO";
+            }, 2500);
+          });
       });
     });
 

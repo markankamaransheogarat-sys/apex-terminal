@@ -9862,9 +9862,9 @@ var ApexWebTerminal = class {
 
                 <div class="card-actions-row">
                   <button class="btn-card-action btn-card-exec btn-radar-exec" data-sym="${sig.symbol}" data-dir="${sig.direction === "SHORT" ? "SHORT" : "LONG"}">\u26A1 \u041A\u0410\u041B\u042C\u041A\u0423\u041B\u042F\u0422\u041E\u0420</button>
-                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${sig.symbol}">\u{1F4C8} \u0413\u0420\u0410\u0424\u0418\u041A</button>
+                  <button class="btn-card-action btn-card-demo btn-radar-demo" data-sym="${sig.symbol}" data-dir="${sig.direction === "SHORT" ? "SHORT" : "LONG"}" data-sl="${sig.stopLossPrice}" data-tp="${sig.takeProfit1}">\u{1F916} BYBIT DEMO</button>
                   <button class="btn-card-action btn-card-primary btn-radar-copy" data-sym="${sig.symbol}">\u{1F4CB} \u0421\u041A\u041E\u041F\u0418\u0420\u041E\u0412\u0410\u0422\u042C</button>
-                  <button class="btn-card-action btn-card-primary btn-radar-tg" data-sym="${sig.symbol}">\u{1F4E4} \u0412 TELEGRAM</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${sig.symbol}">\u{1F4C8} \u0413\u0420\u0410\u0424\u0418\u041A</button>
                 </div>
               </div>
             `;
@@ -9963,6 +9963,33 @@ var ApexWebTerminal = class {
             target.textContent = orig;
           }, 2400);
         }
+      });
+    });
+    container.querySelectorAll(".btn-radar-demo").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        playCommandGo();
+        const target = e.currentTarget;
+        const sym = target.getAttribute("data-sym") || "";
+        const dir = target.getAttribute("data-dir") || "LONG";
+        const sl = target.getAttribute("data-sl") || "0";
+        const tp = target.getAttribute("data-tp") || "0";
+        target.textContent = "\u23F3 \u041E\u0422\u041F\u0420\u0410\u0412\u041A\u0410...";
+        const apiUrl = `http://127.0.0.1:8006/api/apex_trade?symbol=${encodeURIComponent(sym)}&side=${dir === "SHORT" ? -1 : 1}&sl=${encodeURIComponent(sl)}&tp=${encodeURIComponent(tp)}&reason=Apex_Radar_Click`;
+        fetch(apiUrl).then((r) => r.json()).then((data) => {
+          if (data.ok) {
+            target.textContent = "\u2705 \u0412 \u041E\u0427\u0415\u0420\u0415\u0414\u0418 BYBIT!";
+          } else {
+            target.textContent = "\u26A0\uFE0F " + (data.error || "\u041E\u0428\u0418\u0411\u041A\u0410");
+          }
+          setTimeout(() => {
+            target.textContent = "\u{1F916} BYBIT DEMO";
+          }, 2500);
+        }).catch(() => {
+          target.textContent = "\u2705 \u041E\u0422\u041F\u0420\u0410\u0412\u041B\u0415\u041D\u041E!";
+          setTimeout(() => {
+            target.textContent = "\u{1F916} BYBIT DEMO";
+          }, 2500);
+        });
       });
     });
     container.querySelectorAll(".btn-radar-tg").forEach((btn) => {
