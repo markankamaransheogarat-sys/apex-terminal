@@ -174,10 +174,16 @@ export class QuantActionRadarService {
         reason1 = `Ловушка покупателей: фьючерсы с плечами покупают, а спот сбрасывается китами ($${Math.round(sp.spotCvd12hUsd / 1e6)}M).`;
         cvdFlowStatusRu = `⚠️ Ловушка лонгов: Perp CVD +$${(sp.perpCvd12hUsd / 1e6).toFixed(1)}M vs сброс спота -$${Math.abs(sp.spotCvd12hUsd / 1e6).toFixed(1)}M`;
       } else if (sp.regime === "SYNCHRONIZED_BULL_INFLOW") {
-        reason1 = `Синхронный бычий приток: устойчивые покупки одновременно на споте и фьючерсах.`;
+        reason1 =
+          direction === "SHORT"
+            ? `Разгрузка на хаях: локальный приток покупок используется крупными игроками для набора шорта.`
+            : `Синхронный бычий приток: устойчивые покупки одновременно на споте и фьючерсах.`;
         cvdFlowStatusRu = `🟢 Синхронный спрос: Spot CVD +$${(sp.spotCvd12hUsd / 1e6).toFixed(1)}M`;
       } else {
-        reason1 = `Синхронный медвежий отток: чистые продажи на всех деривативных площадках.`;
+        reason1 =
+          direction === "LONG"
+            ? `Поглощение на откате: локальные рыночные продажи встречают лимитный спрос китов у поддержки.`
+            : `Синхронный медвежий отток: чистые продажи на всех деривативных площадках.`;
         cvdFlowStatusRu = `🔴 Чистые продажи: Spot CVD -$${Math.abs(sp.spotCvd12hUsd / 1e6).toFixed(1)}M`;
       }
 

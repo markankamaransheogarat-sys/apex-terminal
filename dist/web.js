@@ -8919,10 +8919,10 @@ var QuantActionRadarService = class _QuantActionRadarService {
         reason1 = `\u041B\u043E\u0432\u0443\u0448\u043A\u0430 \u043F\u043E\u043A\u0443\u043F\u0430\u0442\u0435\u043B\u0435\u0439: \u0444\u044C\u044E\u0447\u0435\u0440\u0441\u044B \u0441 \u043F\u043B\u0435\u0447\u0430\u043C\u0438 \u043F\u043E\u043A\u0443\u043F\u0430\u044E\u0442, \u0430 \u0441\u043F\u043E\u0442 \u0441\u0431\u0440\u0430\u0441\u044B\u0432\u0430\u0435\u0442\u0441\u044F \u043A\u0438\u0442\u0430\u043C\u0438 ($${Math.round(sp.spotCvd12hUsd / 1e6)}M).`;
         cvdFlowStatusRu = `\u26A0\uFE0F \u041B\u043E\u0432\u0443\u0448\u043A\u0430 \u043B\u043E\u043D\u0433\u043E\u0432: Perp CVD +$${(sp.perpCvd12hUsd / 1e6).toFixed(1)}M vs \u0441\u0431\u0440\u043E\u0441 \u0441\u043F\u043E\u0442\u0430 -$${Math.abs(sp.spotCvd12hUsd / 1e6).toFixed(1)}M`;
       } else if (sp.regime === "SYNCHRONIZED_BULL_INFLOW") {
-        reason1 = `\u0421\u0438\u043D\u0445\u0440\u043E\u043D\u043D\u044B\u0439 \u0431\u044B\u0447\u0438\u0439 \u043F\u0440\u0438\u0442\u043E\u043A: \u0443\u0441\u0442\u043E\u0439\u0447\u0438\u0432\u044B\u0435 \u043F\u043E\u043A\u0443\u043F\u043A\u0438 \u043E\u0434\u043D\u043E\u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u043D\u0430 \u0441\u043F\u043E\u0442\u0435 \u0438 \u0444\u044C\u044E\u0447\u0435\u0440\u0441\u0430\u0445.`;
+        reason1 = direction === "SHORT" ? `\u0420\u0430\u0437\u0433\u0440\u0443\u0437\u043A\u0430 \u043D\u0430 \u0445\u0430\u044F\u0445: \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u044B\u0439 \u043F\u0440\u0438\u0442\u043E\u043A \u043F\u043E\u043A\u0443\u043F\u043E\u043A \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0435\u0442\u0441\u044F \u043A\u0440\u0443\u043F\u043D\u044B\u043C\u0438 \u0438\u0433\u0440\u043E\u043A\u0430\u043C\u0438 \u0434\u043B\u044F \u043D\u0430\u0431\u043E\u0440\u0430 \u0448\u043E\u0440\u0442\u0430.` : `\u0421\u0438\u043D\u0445\u0440\u043E\u043D\u043D\u044B\u0439 \u0431\u044B\u0447\u0438\u0439 \u043F\u0440\u0438\u0442\u043E\u043A: \u0443\u0441\u0442\u043E\u0439\u0447\u0438\u0432\u044B\u0435 \u043F\u043E\u043A\u0443\u043F\u043A\u0438 \u043E\u0434\u043D\u043E\u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u043D\u0430 \u0441\u043F\u043E\u0442\u0435 \u0438 \u0444\u044C\u044E\u0447\u0435\u0440\u0441\u0430\u0445.`;
         cvdFlowStatusRu = `\u{1F7E2} \u0421\u0438\u043D\u0445\u0440\u043E\u043D\u043D\u044B\u0439 \u0441\u043F\u0440\u043E\u0441: Spot CVD +$${(sp.spotCvd12hUsd / 1e6).toFixed(1)}M`;
       } else {
-        reason1 = `\u0421\u0438\u043D\u0445\u0440\u043E\u043D\u043D\u044B\u0439 \u043C\u0435\u0434\u0432\u0435\u0436\u0438\u0439 \u043E\u0442\u0442\u043E\u043A: \u0447\u0438\u0441\u0442\u044B\u0435 \u043F\u0440\u043E\u0434\u0430\u0436\u0438 \u043D\u0430 \u0432\u0441\u0435\u0445 \u0434\u0435\u0440\u0438\u0432\u0430\u0442\u0438\u0432\u043D\u044B\u0445 \u043F\u043B\u043E\u0449\u0430\u0434\u043A\u0430\u0445.`;
+        reason1 = direction === "LONG" ? `\u041F\u043E\u0433\u043B\u043E\u0449\u0435\u043D\u0438\u0435 \u043D\u0430 \u043E\u0442\u043A\u0430\u0442\u0435: \u043B\u043E\u043A\u0430\u043B\u044C\u043D\u044B\u0435 \u0440\u044B\u043D\u043E\u0447\u043D\u044B\u0435 \u043F\u0440\u043E\u0434\u0430\u0436\u0438 \u0432\u0441\u0442\u0440\u0435\u0447\u0430\u044E\u0442 \u043B\u0438\u043C\u0438\u0442\u043D\u044B\u0439 \u0441\u043F\u0440\u043E\u0441 \u043A\u0438\u0442\u043E\u0432 \u0443 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u043A\u0438.` : `\u0421\u0438\u043D\u0445\u0440\u043E\u043D\u043D\u044B\u0439 \u043C\u0435\u0434\u0432\u0435\u0436\u0438\u0439 \u043E\u0442\u0442\u043E\u043A: \u0447\u0438\u0441\u0442\u044B\u0435 \u043F\u0440\u043E\u0434\u0430\u0436\u0438 \u043D\u0430 \u0432\u0441\u0435\u0445 \u0434\u0435\u0440\u0438\u0432\u0430\u0442\u0438\u0432\u043D\u044B\u0445 \u043F\u043B\u043E\u0449\u0430\u0434\u043A\u0430\u0445.`;
         cvdFlowStatusRu = `\u{1F534} \u0427\u0438\u0441\u0442\u044B\u0435 \u043F\u0440\u043E\u0434\u0430\u0436\u0438: Spot CVD -$${Math.abs(sp.spotCvd12hUsd / 1e6).toFixed(1)}M`;
       }
       let reason2 = "";
@@ -9734,7 +9734,7 @@ var ApexWebTerminal = class {
                   </div>
                   <div class="level-cell">
                     <span class="level-lbl">\u0421\u0442\u043E\u043F (SL \u0437\u0430 \u043F\u043B\u0438\u0442\u043E\u0439)</span>
-                    <span class="level-val text-red">$${fmtPrice(radar.topLongPick.stopLossPrice)} (-${radar.topLongPick.stopDistancePercent}%)</span>
+                    <span class="level-val text-red">$${fmtPrice(radar.topLongPick.stopLossPrice)} (\u0440\u0438\u0441\u043A ${radar.topLongPick.stopDistancePercent}%)</span>
                   </div>
                   <div class="level-cell">
                     <span class="level-lbl">TP1 (\u0410\u0432\u0442\u043E-\u0411\u0423)</span>
@@ -9769,7 +9769,7 @@ var ApexWebTerminal = class {
                   </div>
                   <div class="level-cell">
                     <span class="level-lbl">\u0421\u0442\u043E\u043F (SL \u043D\u0430\u0434 \u0441\u0442\u0435\u043D\u043E\u0439)</span>
-                    <span class="level-val text-red">$${fmtPrice(radar.topShortPick.stopLossPrice)} (+${radar.topShortPick.stopDistancePercent}%)</span>
+                    <span class="level-val text-red">$${fmtPrice(radar.topShortPick.stopLossPrice)} (\u0440\u0438\u0441\u043A ${radar.topShortPick.stopDistancePercent}%)</span>
                   </div>
                   <div class="level-cell">
                     <span class="level-lbl">TP1 (\u0410\u0432\u0442\u043E-\u0411\u0423)</span>
@@ -9831,7 +9831,7 @@ var ApexWebTerminal = class {
                   </div>
                   <div class="level-cell">
                     <span class="level-lbl">\u0421\u0442\u043E\u043F (SL)</span>
-                    <span class="level-val text-red">$${fmtPrice(sig.stopLossPrice)} (-${sig.stopDistancePercent}%)</span>
+                    <span class="level-val text-red">$${fmtPrice(sig.stopLossPrice)} (\u0440\u0438\u0441\u043A ${sig.stopDistancePercent}%)</span>
                   </div>
                   <div class="level-cell">
                     <span class="level-lbl">\u0426\u0435\u043B\u044C 1 (TP1 \u0410\u0432\u0442\u043E-\u0411\u0423)</span>
@@ -9861,10 +9861,10 @@ var ApexWebTerminal = class {
                 </div>
 
                 <div class="card-actions-row">
-                  <button class="btn-card-action btn-card-exec btn-radar-exec" data-sym="${sig.symbol}" data-dir="${sig.direction === "SHORT" ? "SHORT" : "LONG"}">\u26A1 \u0412 \u041A\u0410\u041B\u042C\u041A\u0423\u041B\u042F\u0422\u041E\u0420</button>
+                  <button class="btn-card-action btn-card-exec btn-radar-exec" data-sym="${sig.symbol}" data-dir="${sig.direction === "SHORT" ? "SHORT" : "LONG"}">\u26A1 \u041A\u0410\u041B\u042C\u041A\u0423\u041B\u042F\u0422\u041E\u0420</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${sig.symbol}">\u{1F4C8} \u0413\u0420\u0410\u0424\u0418\u041A</button>
                   <button class="btn-card-action btn-card-primary btn-radar-copy" data-sym="${sig.symbol}">\u{1F4CB} \u0421\u041A\u041E\u041F\u0418\u0420\u041E\u0412\u0410\u0422\u042C</button>
                   <button class="btn-card-action btn-card-primary btn-radar-tg" data-sym="${sig.symbol}">\u{1F4E4} \u0412 TELEGRAM</button>
-                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${sig.symbol}">\u{1F4C8} \u0413\u0420\u0410\u0424\u0418\u041A</button>
                 </div>
               </div>
             `;

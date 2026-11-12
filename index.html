@@ -1774,21 +1774,23 @@
 
       /* Card Action Buttons */
       .card-actions-row {
-        display: flex;
-        gap: 8px;
-        margin-top: 4px;
-        flex-wrap: wrap;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+        margin-top: 6px;
       }
       .btn-card-action {
-        flex: 1;
-        min-width: 90px;
-        padding: 7px 10px;
+        width: 100%;
+        padding: 6px 8px;
         border-radius: 6px;
         font-family: var(--font-sans);
-        font-size: 0.74rem;
+        font-size: 0.72rem;
         font-weight: 600;
         cursor: pointer;
         text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
         transition: all 0.15s ease;
       }
       .btn-card-primary {

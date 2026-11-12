@@ -895,7 +895,7 @@ class ApexWebTerminal {
                   </div>
                   <div class="level-cell">
                     <span class="level-lbl">Стоп (SL за плитой)</span>
-                    <span class="level-val text-red">$${fmtPrice(radar.topLongPick.stopLossPrice)} (-${radar.topLongPick.stopDistancePercent}%)</span>
+                    <span class="level-val text-red">$${fmtPrice(radar.topLongPick.stopLossPrice)} (риск ${radar.topLongPick.stopDistancePercent}%)</span>
                   </div>
                   <div class="level-cell">
                     <span class="level-lbl">TP1 (Авто-БУ)</span>
@@ -934,7 +934,7 @@ class ApexWebTerminal {
                   </div>
                   <div class="level-cell">
                     <span class="level-lbl">Стоп (SL над стеной)</span>
-                    <span class="level-val text-red">$${fmtPrice(radar.topShortPick.stopLossPrice)} (+${radar.topShortPick.stopDistancePercent}%)</span>
+                    <span class="level-val text-red">$${fmtPrice(radar.topShortPick.stopLossPrice)} (риск ${radar.topShortPick.stopDistancePercent}%)</span>
                   </div>
                   <div class="level-cell">
                     <span class="level-lbl">TP1 (Авто-БУ)</span>
@@ -1017,7 +1017,7 @@ class ApexWebTerminal {
                   </div>
                   <div class="level-cell">
                     <span class="level-lbl">Стоп (SL)</span>
-                    <span class="level-val text-red">$${fmtPrice(sig.stopLossPrice)} (-${sig.stopDistancePercent}%)</span>
+                    <span class="level-val text-red">$${fmtPrice(sig.stopLossPrice)} (риск ${sig.stopDistancePercent}%)</span>
                   </div>
                   <div class="level-cell">
                     <span class="level-lbl">Цель 1 (TP1 Авто-БУ)</span>
@@ -1047,10 +1047,10 @@ class ApexWebTerminal {
                 </div>
 
                 <div class="card-actions-row">
-                  <button class="btn-card-action btn-card-exec btn-radar-exec" data-sym="${sig.symbol}" data-dir="${sig.direction === "SHORT" ? "SHORT" : "LONG"}">⚡ В КАЛЬКУЛЯТОР</button>
+                  <button class="btn-card-action btn-card-exec btn-radar-exec" data-sym="${sig.symbol}" data-dir="${sig.direction === "SHORT" ? "SHORT" : "LONG"}">⚡ КАЛЬКУЛЯТОР</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${sig.symbol}">📈 ГРАФИК</button>
                   <button class="btn-card-action btn-card-primary btn-radar-copy" data-sym="${sig.symbol}">📋 СКОПИРОВАТЬ</button>
                   <button class="btn-card-action btn-card-primary btn-radar-tg" data-sym="${sig.symbol}">📤 В TELEGRAM</button>
-                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${sig.symbol}">📈 ГРАФИК</button>
                 </div>
               </div>
             `;
