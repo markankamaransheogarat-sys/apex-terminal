@@ -11,11 +11,12 @@ Institutional digital asset execution cockpit, 24-hour multi-venue whale tranche
 
 ---
 
-## ⚡ 15 Institutional `<GO>` Modules
+## ⚡ 16 Institutional `<GO>` Modules
 
 | Screen Command | Module & Quantitative Capabilities |
 | :--- | :--- |
-| **`MARKET <GO>`** `[F2]` | Live multi-asset streaming matrix (`Binance WS`), 24h orderflow bid/ask imbalance, and Fear & Greed index. |
+| **`🎯 RADAR <GO>`** `[F1]` | **Executive Action Radar (Where to BUY / SELL)**: Fully automated synthesis of 6 quant factors into crystal-clear BUY / SELL / WAIT verdicts, wall-protected SL, TP1-TP3 targets, R:R $\ge 2.0$, and 1-click execution blotter / Telegram ticket dispatch. |
+| **`MARKET <GO>`** `[F2]` | Live multi-asset streaming matrix (`Binance WS`), 24h orderflow bid/ask imbalance, Fear & Greed index, and instant Executive Action banner. |
 | **`📈 CHART <GO>`** `[F5]` | 60 FPS HTML5 Canvas candlestick chart with session VWAP, horizontal Volume Profile (POC), and overlaid **Whale Campaign VWAP lines & block trade footprints**. |
 | **`🧱 BOOK <GO>`** | **Deep 1,000-Level L2 Orderbook** (`limit=1000` REST + `@depth20@100ms` WS), **Interactive Price-Bucket Zoom (`$1`–`$250`)**, **Top 4 Bid/Ask Capital Concentration Zones** (`ГДЕ СИДИТ ОСНОВНАЯ МАССА БАБЛА`), **Stoikov (2018) Micro-Price & micro-alpha skew (bps)**, and \$500K market sweep slippage estimator. |
 | **`🧬 QUANT <GO>`** | **6-Factor Master Institutional Confluence Matrix (`-100..+100`)**, **Spot vs. Perp 12h CVD Divergence**, **Live US Coinbase Spot Premium (bps)**, **Statistical Arbitrage (StatArb) Pairs Z-Score & Ornstein-Uhlenbeck Half-Life**, and **DeFiLlama Global Stablecoin Mint/Burn Impulse & Chain TVL**. |

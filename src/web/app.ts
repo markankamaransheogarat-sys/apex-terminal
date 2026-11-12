@@ -71,6 +71,7 @@ import { DerivativesIntelligenceService } from "../derivatives/derivatives-intel
 import { QuantExecutionCalculator } from "../execution/quant-execution-calculator.js";
 import { ExecutionBlotterService } from "../execution/execution-blotter.js";
 import { WorldClassQuantService } from "../quant/world-class-alpha.js";
+import { QuantActionRadarService } from "../quant/action-radar-service.js";
 
 class ApexWebTerminal {
   private binanceWs: BinanceWsFeedManager;
@@ -126,6 +127,7 @@ class ApexWebTerminal {
   private isEditingCustomPortfolio: boolean = false;
 
   private activeScreen:
+    | "RADAR"
     | "MARKET"
     | "CHART"
     | "BOOK"
@@ -142,6 +144,7 @@ class ApexWebTerminal {
     | "PORT"
     | "ALERT"
     | "HELP" = "MARKET";
+  private radarFilter: "ALL" | "BUY" | "SELL" | "HIGH_CONVICTION" = "ALL";
   private selectedStressId: string = "CRYPTO_CRASH_20";
   private whaleFilter: "ALL" | "100K" | "500K" | "1M" = "ALL";
 
@@ -250,6 +253,7 @@ class ApexWebTerminal {
             <button id="btn-go" class="btn-go">&lt;GO&gt;</button>
           </div>
           <div class="quick-commands">
+            <button class="cmd-chip radar-chip" data-cmd="RADAR">🎯 СИГНАЛЫ &lt;GO&gt;</button>
             <button class="cmd-chip active" data-cmd="MARKET">MARKET &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="CHART">📈 CHART &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="BOOK">🧱 BOOK &lt;GO&gt;</button>
@@ -384,7 +388,20 @@ class ApexWebTerminal {
 
     playCommandGo();
 
-    if (cleaned === "MARKET" || cleaned === "MKT") {
+    if (
+      cleaned === "RADAR" ||
+      cleaned === "SIGNALS" ||
+      cleaned === "SIGNAL" ||
+      cleaned === "ACTION" ||
+      cleaned === "BUY" ||
+      cleaned === "SELL" ||
+      cleaned === "BRIEF" ||
+      cleaned === "CALLS" ||
+      cleaned === "СИГНАЛЫ" ||
+      cleaned === "СИГНАЛ"
+    ) {
+      this.activeScreen = "RADAR";
+    } else if (cleaned === "MARKET" || cleaned === "MKT") {
       this.activeScreen = "MARKET";
     } else if (
       cleaned === "CHART" ||
@@ -742,7 +759,9 @@ class ApexWebTerminal {
     const body = document.getElementById("terminal-body");
     if (!body) return;
 
-    if (this.activeScreen === "MARKET") {
+    if (this.activeScreen === "RADAR") {
+      this.renderRadarScreen(body);
+    } else if (this.activeScreen === "MARKET") {
       this.renderMarketScreen(body);
     } else if (this.activeScreen === "CHART") {
       this.renderChartScreen(body);
@@ -778,9 +797,426 @@ class ApexWebTerminal {
   }
 
   // ==========================================
+  // SCREEN: QUANT EXECUTIVE ACTION RADAR (RADAR <GO>)
+  // ==========================================
+  private renderRadarScreen(container: HTMLElement): void {
+    const btcOpt = this.derivService.getOptionsSnapshot("BTC");
+    const ethOpt = this.derivService.getOptionsSnapshot("ETH");
+    const confluenceRows = this.quantEngine.computeMasterConfluenceMatrix({
+      tickers: this.tickers,
+      fundingRates: this.fundingRates,
+      whaleTrades: this.whaleStream.getWhaleTrades(),
+      orderbookSnapshots: (sym: string) =>
+        this.orderbookService.getSnapshotForSymbol(sym),
+      btcOptions: btcOpt,
+      ethOptions: ethOpt,
+    });
+    const statArbRows = WorldClassQuantService.computeStatArbMatrix(
+      this.returnsService.getReturns(),
+      this.tickers,
+    );
+    const chartData = this.chartService.buildChartData();
+    const radar = QuantActionRadarService.synthesizeRadar({
+      confluenceRows,
+      tickers: this.tickers,
+      fundingRates: this.fundingRates,
+      whaleTrades: this.whaleStream.getWhaleTrades(),
+      whaleCampaigns: this.whaleStream.getTrancheCampaigns(),
+      orderbookSnapshots: (sym: string) =>
+        this.orderbookService.getSnapshotForSymbol(sym),
+      statArbRows,
+      candlesProvider: (sym) =>
+        sym === chartData.symbol ? chartData.candles : [],
+      accountBalanceUsd: this.execBalanceUsd,
+      riskPercent: this.execRiskPercent,
+    });
+
+    let filteredSignals = radar.signals;
+    if (this.radarFilter === "BUY") {
+      filteredSignals = radar.signals.filter(
+        (s) => s.verdict === "STRONG_BUY" || s.verdict === "ACCUMULATE_DIP",
+      );
+    } else if (this.radarFilter === "SELL") {
+      filteredSignals = radar.signals.filter(
+        (s) => s.verdict === "STRONG_SELL" || s.verdict === "DISTRIBUTE_RALLY",
+      );
+    } else if (this.radarFilter === "HIGH_CONVICTION") {
+      filteredSignals = radar.signals.filter((s) => s.convictionPercent >= 65);
+    }
+
+    const fmtPrice = (p: number) => QuantActionRadarService.formatPrice(p);
+
+    container.innerHTML = `
+      <div class="terminal-screen screen-radar">
+        <div class="radar-screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">🎯 0. QUANT EXECUTIVE ACTION RADAR (СВОДКА: ГДЕ ПОКУПАТЬ / ПРОДАВАТЬ)</h2>
+            <span class="screen-subtitle">АВТОМАТИЗИРОВАННЫЙ СИНТЕЗ 6 КВАНТ-ФАКТОРОВ · ВХОД, СТОП ЗА ПЛИТОЙ, ТЕЙК-ПРОФИТЫ И R:R</span>
+          </div>
+          <div class="radar-pills-wrap">
+            <div class="stat-pill">
+              <span class="pill-label">РЕЖИМ РЫНКА</span>
+              <span class="pill-val ${radar.marketBiasScore >= 20 ? "text-green" : radar.marketBiasScore <= -20 ? "text-red" : "text-amber"}">
+                ${radar.overallMarketRegimeRu}
+              </span>
+            </div>
+            <div class="stat-pill">
+              <span class="pill-label">СВОДКА СИГНАЛОВ</span>
+              <span class="pill-val">
+                <span class="text-green">🟢 ${radar.buyCount} BUY</span> · 
+                <span class="text-red">🔴 ${radar.sellCount} SELL</span> · 
+                <span class="text-muted">⚪ ${radar.waitCount} WAIT</span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Top Pick Hero Cards -->
+        ${
+          radar.topLongPick || radar.topShortPick
+            ? `
+          <div class="radar-hero-grid">
+            ${
+              radar.topLongPick
+                ? `
+              <div class="hero-pick-card long-hero">
+                <div class="card-top-row">
+                  <div>
+                    <span class="hero-tag text-green">⭐ ЛУЧШИЙ СЕТАП НА ПОКУПКУ (TOP LONG PICK)</span>
+                    <div class="card-symbol">${radar.topLongPick.asset}/USDT</div>
+                    <div class="card-price">$${fmtPrice(radar.topLongPick.price)}</div>
+                  </div>
+                  <div class="verdict-badge verdict-buy">${radar.topLongPick.verdictLabelRu}</div>
+                </div>
+                <div class="card-levels-grid">
+                  <div class="level-cell">
+                    <span class="level-lbl">Вход (Entry)</span>
+                    <span class="level-val">$${fmtPrice(radar.topLongPick.entryPrice)}</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">Стоп (SL за плитой)</span>
+                    <span class="level-val text-red">$${fmtPrice(radar.topLongPick.stopLossPrice)} (-${radar.topLongPick.stopDistancePercent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">TP1 (Авто-БУ)</span>
+                    <span class="level-val text-green">$${fmtPrice(radar.topLongPick.takeProfit1)} (+${radar.topLongPick.takeProfit1Percent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">R:R Соотношение</span>
+                    <span class="level-val text-green">${radar.topLongPick.rewardToRisk} : 1</span>
+                  </div>
+                </div>
+                <div class="card-actions-row">
+                  <button class="btn-card-action btn-card-exec btn-radar-exec" data-sym="${radar.topLongPick.symbol}" data-dir="LONG">⚡ В КАЛЬКУЛЯТОР (EXEC)</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-copy" data-sym="${radar.topLongPick.symbol}">📋 СКОПИРОВАТЬ ТИКЕТ</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${radar.topLongPick.symbol}">📈 ГРАФИК</button>
+                </div>
+              </div>
+            `
+                : ""
+            }
+            ${
+              radar.topShortPick
+                ? `
+              <div class="hero-pick-card short-hero">
+                <div class="card-top-row">
+                  <div>
+                    <span class="hero-tag text-red">⭐ ЛУЧШИЙ СЕТАП НА ПРОДАЖУ / ХЕДЖ (TOP SHORT)</span>
+                    <div class="card-symbol">${radar.topShortPick.asset}/USDT</div>
+                    <div class="card-price">$${fmtPrice(radar.topShortPick.price)}</div>
+                  </div>
+                  <div class="verdict-badge verdict-sell">${radar.topShortPick.verdictLabelRu}</div>
+                </div>
+                <div class="card-levels-grid">
+                  <div class="level-cell">
+                    <span class="level-lbl">Вход (Entry)</span>
+                    <span class="level-val">$${fmtPrice(radar.topShortPick.entryPrice)}</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">Стоп (SL над стеной)</span>
+                    <span class="level-val text-red">$${fmtPrice(radar.topShortPick.stopLossPrice)} (+${radar.topShortPick.stopDistancePercent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">TP1 (Авто-БУ)</span>
+                    <span class="level-val text-green">$${fmtPrice(radar.topShortPick.takeProfit1)} (-${radar.topShortPick.takeProfit1Percent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">R:R Соотношение</span>
+                    <span class="level-val text-green">${radar.topShortPick.rewardToRisk} : 1</span>
+                  </div>
+                </div>
+                <div class="card-actions-row">
+                  <button class="btn-card-action btn-card-exec btn-radar-exec" data-sym="${radar.topShortPick.symbol}" data-dir="SHORT">⚡ В КАЛЬКУЛЯТОР (EXEC)</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-copy" data-sym="${radar.topShortPick.symbol}">📋 СКОПИРОВАТЬ ТИКЕТ</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${radar.topShortPick.symbol}">📈 ГРАФИК</button>
+                </div>
+              </div>
+            `
+                : ""
+            }
+          </div>
+        `
+            : ""
+        }
+
+        <!-- Filter Bar -->
+        <div class="radar-filter-bar">
+          <button class="radar-filter-btn ${this.radarFilter === "ALL" ? "active" : ""}" data-filter="ALL">ВСЕ СИГНАЛЫ (${radar.totalTracked})</button>
+          <button class="radar-filter-btn ${this.radarFilter === "BUY" ? "active" : ""}" data-filter="BUY">🟢 ТОЛЬКО ПОКУПАТЬ (${radar.buyCount})</button>
+          <button class="radar-filter-btn ${this.radarFilter === "SELL" ? "active" : ""}" data-filter="SELL">🔴 ТОЛЬКО ПРОДАВАТЬ (${radar.sellCount})</button>
+          <button class="radar-filter-btn ${this.radarFilter === "HIGH_CONVICTION" ? "active" : ""}" data-filter="HIGH_CONVICTION">⭐ ВЫСОКАЯ УВЕРЕННОСТЬ (≥65%)</button>
+        </div>
+
+        <!-- Signals Cards Grid -->
+        <div class="radar-cards-grid">
+          ${filteredSignals
+            .map((sig) => {
+              const cardClass =
+                sig.direction === "LONG"
+                  ? "card-buy"
+                  : sig.direction === "SHORT"
+                    ? "card-sell"
+                    : "card-wait";
+              const verdictClass =
+                sig.direction === "LONG"
+                  ? "verdict-buy"
+                  : sig.direction === "SHORT"
+                    ? "verdict-sell"
+                    : "verdict-wait";
+              const fillClass =
+                sig.direction === "LONG"
+                  ? "fill-green"
+                  : sig.direction === "SHORT"
+                    ? "fill-red"
+                    : "fill-neutral";
+
+              return `
+              <div class="signal-card ${cardClass}" id="sig-card-${sig.symbol}">
+                <div class="card-top-row">
+                  <div class="card-sym-group">
+                    <span class="card-symbol">${sig.asset}/USDT</span>
+                    <span class="card-price">$${fmtPrice(sig.price)}</span>
+                  </div>
+                  <div class="verdict-badge ${verdictClass}">${sig.verdictLabelRu}</div>
+                </div>
+
+                <div class="conviction-box">
+                  <div class="conviction-header">
+                    <span>УВЕРЕННОСТЬ (CONFLUENCE)</span>
+                    <strong>${sig.convictionPercent}% (СКОР: ${sig.masterScore >= 0 ? "+" : ""}${sig.masterScore})</strong>
+                  </div>
+                  <div class="conviction-track">
+                    <div class="conviction-fill ${fillClass}" style="width: ${sig.convictionPercent}%"></div>
+                  </div>
+                </div>
+
+                <div class="card-levels-grid">
+                  <div class="level-cell">
+                    <span class="level-lbl">Вход (Entry)</span>
+                    <span class="level-val">$${fmtPrice(sig.entryPrice)}</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">Стоп (SL)</span>
+                    <span class="level-val text-red">$${fmtPrice(sig.stopLossPrice)} (-${sig.stopDistancePercent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">Цель 1 (TP1 Авто-БУ)</span>
+                    <span class="level-val text-green">$${fmtPrice(sig.takeProfit1)} (+${sig.takeProfit1Percent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">Цель 2 (TP2 Тренд)</span>
+                    <span class="level-val text-green">$${fmtPrice(sig.takeProfit2)} (+${sig.takeProfit2Percent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">Цель 3 (Ликвидации)</span>
+                    <span class="level-val text-amber">$${fmtPrice(sig.takeProfit3)} (+${sig.takeProfit3Percent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">R:R Риск/Прибыль</span>
+                    <span class="level-val text-green">${sig.rewardToRisk} : 1</span>
+                  </div>
+                </div>
+
+                <div class="card-reasons-box">
+                  <span class="reasons-title">🔍 3 КЛЮЧЕВЫХ ФАКТОРА:</span>
+                  <ul class="reasons-list">
+                    <li>${sig.primaryReasonsRu[0]}</li>
+                    <li>${sig.primaryReasonsRu[1]}</li>
+                    <li>${sig.primaryReasonsRu[2]}</li>
+                  </ul>
+                </div>
+
+                <div class="card-actions-row">
+                  <button class="btn-card-action btn-card-exec btn-radar-exec" data-sym="${sig.symbol}" data-dir="${sig.direction === "SHORT" ? "SHORT" : "LONG"}">⚡ В КАЛЬКУЛЯТОР</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-copy" data-sym="${sig.symbol}">📋 СКОПИРОВАТЬ</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-tg" data-sym="${sig.symbol}">📤 В TELEGRAM</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${sig.symbol}">📈 ГРАФИК</button>
+                </div>
+              </div>
+            `;
+            })
+            .join("")}
+        </div>
+
+        <!-- Delta-Neutral StatArb Pairs -->
+        ${
+          radar.statArbNeutralPicks.length > 0
+            ? `
+          <div class="terminal-card mt-4">
+            <div class="card-header">
+              <span class="card-title">📐 РЫНОЧНО-НЕЙТРАЛЬНЫЙ АРБИТРАЖ (STATARB ПАРЫ БЕЗ РИСКА РЫНКА)</span>
+              <span class="badge badge-calibrated">ОРНШТЕЙН-УЛЕНБЕК Z-SCORE</span>
+            </div>
+            <div class="market-matrix-table-wrap">
+              <table class="terminal-table">
+                <thead>
+                  <tr>
+                    <th>ПАРА</th>
+                    <th>СИГНАЛ</th>
+                    <th>СПРЕД Z-SCORE</th>
+                    <th>ПЕРИОД ПОЛУРАСПАДА</th>
+                    <th>КОРРЕЛЯЦИЯ 60D</th>
+                    <th>РЕКОМЕНДАЦИЯ К ДЕЙСТВИЮ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${radar.statArbNeutralPicks
+                    .map(
+                      (p) => `
+                    <tr>
+                      <td class="td-symbol"><strong>${p.pairLabel}</strong></td>
+                      <td><span class="badge ${p.signal.includes("LONG_A") ? "badge-green" : "badge-red"}">${p.signal}</span></td>
+                      <td class="${p.spreadZScore <= -1.6 ? "text-green" : "text-red"}"><strong>${p.spreadZScore >= 0 ? "+" : ""}${p.spreadZScore}σ</strong></td>
+                      <td>${p.halfLifeDays} дн.</td>
+                      <td>${p.correlation60d}</td>
+                      <td><strong>${p.actionableCall}</strong></td>
+                    </tr>
+                  `,
+                    )
+                    .join("")}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `
+            : ""
+        }
+      </div>
+    `;
+
+    // Event Listeners: Filter Buttons
+    container.querySelectorAll(".radar-filter-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        playCommandGo();
+        const f = (e.currentTarget as HTMLElement).getAttribute(
+          "data-filter",
+        ) as any;
+        if (f) {
+          this.radarFilter = f;
+          this.renderRadarScreen(container);
+        }
+      });
+    });
+
+    // Event Listeners: Open in Exec Calculator
+    container.querySelectorAll(".btn-radar-exec").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        playCommandGo();
+        const sym = (e.currentTarget as HTMLElement).getAttribute("data-sym");
+        const dir = (e.currentTarget as HTMLElement).getAttribute(
+          "data-dir",
+        ) as "LONG" | "SHORT";
+        if (sym) {
+          this.execSymbol = sym;
+          if (dir) this.execDirection = dir;
+          this.executeCommand("EXEC <GO>");
+        }
+      });
+    });
+
+    // Event Listeners: Open Chart
+    container.querySelectorAll(".btn-radar-chart").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        playCommandGo();
+        const sym = (e.currentTarget as HTMLElement).getAttribute("data-sym");
+        if (sym) {
+          this.chartService.loadCandles(sym);
+          this.executeCommand("CHART <GO>");
+        }
+      });
+    });
+
+    // Event Listeners: Copy Telegram Ticket
+    container.querySelectorAll(".btn-radar-copy").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        playCommandGo();
+        const sym = (e.currentTarget as HTMLElement).getAttribute("data-sym");
+        const sig = radar.signals.find((s) => s.symbol === sym);
+        if (sig) {
+          if (typeof navigator !== "undefined" && navigator.clipboard) {
+            navigator.clipboard
+              .writeText(sig.telegramTicketText)
+              .catch(() => {});
+          }
+          const target = e.currentTarget as HTMLButtonElement;
+          const orig = target.textContent;
+          target.textContent = "✅ СКОПИРОВАНО!";
+          setTimeout(() => {
+            target.textContent = orig;
+          }, 2400);
+        }
+      });
+    });
+
+    // Event Listeners: Send to Telegram Bot
+    container.querySelectorAll(".btn-radar-tg").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        playCommandGo();
+        const sym = (e.currentTarget as HTMLElement).getAttribute("data-sym");
+        const sig = radar.signals.find((s) => s.symbol === sym);
+        if (sig && sig.quantSetup) {
+          const target = e.currentTarget as HTMLButtonElement;
+          this.alertManager
+            .dispatchTradeSetupTicket(sig.quantSetup)
+            .then((res) => {
+              target.textContent = res.telegramSent
+                ? "✅ ОТПРАВЛЕНО В TG!"
+                : "✅ СКОПИРОВАНО!";
+              setTimeout(() => {
+                target.textContent = "📤 В TELEGRAM";
+              }, 2500);
+            });
+        }
+      });
+    });
+  }
+
+  // ==========================================
   // SCREEN: MARKET MATRIX
   // ==========================================
   private renderMarketScreen(container: HTMLElement): void {
+    const btcOpt = this.derivService.getOptionsSnapshot("BTC");
+    const ethOpt = this.derivService.getOptionsSnapshot("ETH");
+    const confluenceRows = this.quantEngine.computeMasterConfluenceMatrix({
+      tickers: this.tickers,
+      fundingRates: this.fundingRates,
+      whaleTrades: this.whaleStream.getWhaleTrades(),
+      orderbookSnapshots: (sym: string) =>
+        this.orderbookService.getSnapshotForSymbol(sym),
+      btcOptions: btcOpt,
+      ethOptions: ethOpt,
+    });
+    const quickRadar = QuantActionRadarService.synthesizeRadar({
+      confluenceRows,
+      tickers: this.tickers,
+      fundingRates: this.fundingRates,
+      whaleTrades: this.whaleStream.getWhaleTrades(),
+      orderbookSnapshots: (sym: string) =>
+        this.orderbookService.getSnapshotForSymbol(sym),
+      accountBalanceUsd: this.execBalanceUsd,
+      riskPercent: this.execRiskPercent,
+    });
+
     container.innerHTML = `
       <div class="terminal-screen screen-market">
         <div class="screen-header">
@@ -804,6 +1240,27 @@ class ApexWebTerminal {
           </div>
         </div>
 
+        <!-- Executive Action Radar Hero Banner -->
+        <div class="market-radar-banner" id="market-radar-banner">
+          <div class="mrb-left">
+            <span class="mrb-badge">⚡ КРАТКАЯ СВОДКА СИГНАЛОВ (RADAR &lt;GO&gt;)</span>
+            <span class="mrb-regime">${quickRadar.overallMarketRegimeRu}</span>
+          </div>
+          <div class="mrb-calls">
+            ${quickRadar.signals
+              .slice(0, 5)
+              .map(
+                (s) => `
+              <span class="mrb-call-chip ${s.direction === "LONG" ? "chip-long" : s.direction === "SHORT" ? "chip-short" : "chip-wait"}" data-sym="${s.symbol}">
+                <strong>${s.asset}</strong>: ${s.direction === "LONG" ? "🟢 LONG" : s.direction === "SHORT" ? "🔴 SHORT" : "⚪ WAIT"} (${s.convictionPercent}%)
+              </span>
+            `,
+              )
+              .join("")}
+          </div>
+          <button class="btn-open-radar" id="btn-open-radar">ОТКРЫТЬ ВСЕ СИГНАЛЫ (RADAR &lt;GO&gt;) ➔</button>
+        </div>
+
         <div class="market-matrix-table-wrap">
           <table class="terminal-table" id="market-table">
             <thead>
@@ -824,6 +1281,19 @@ class ApexWebTerminal {
         </div>
       </div>
     `;
+
+    document.getElementById("btn-open-radar")?.addEventListener("click", () => {
+      this.executeCommand("RADAR <GO>");
+    });
+    container.querySelectorAll(".mrb-call-chip").forEach((chip) => {
+      chip.addEventListener("click", (e) => {
+        const sym = (e.currentTarget as HTMLElement).getAttribute("data-sym");
+        if (sym) {
+          this.chartService.loadCandles(sym);
+          this.executeCommand("RADAR <GO>");
+        }
+      });
+    });
   }
 
   private renderTableRow(sym: string): string {
@@ -4299,6 +4769,11 @@ class ApexWebTerminal {
         </div>
 
         <div class="help-grid">
+          <div class="help-card" style="border-color: var(--amber);">
+            <span class="help-cmd" style="color: var(--amber);">🎯 RADAR &lt;GO&gt; / SIGNALS &lt;GO&gt;</span>
+            <p><strong>Executive Action Radar</strong>: Краткая автоматическая сводка где ПОКУПАТЬ или ПРОДАВАТЬ. Синтез 6 квант-факторов, точный вход, стоп за L2-плитой, TP1-TP3 и R:R.</p>
+          </div>
+
           <div class="help-card">
             <span class="help-cmd">MARKET &lt;GO&gt; [F2]</span>
             <p>Live streaming multi-asset pricing matrix, orderflow depth imbalance, and Fear &amp; Greed gauge (100% Real Live Binance).</p>

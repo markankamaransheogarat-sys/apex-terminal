@@ -8835,6 +8835,261 @@ var WorldClassQuantService = class _WorldClassQuantService {
   }
 };
 
+// src/quant/action-radar-service.ts
+var QuantActionRadarService = class _QuantActionRadarService {
+  /**
+   * Synthesize real-time data across all 6 quantitative pillars into an Executive Radar summary.
+   */
+  static synthesizeRadar(params) {
+    const balance = Math.max(100, params.accountBalanceUsd || 1e4);
+    const riskPct = Math.max(0.1, Math.min(10, params.riskPercent || 1));
+    const campaigns = params.whaleCampaigns || [];
+    const signals = [];
+    for (const row of params.confluenceRows) {
+      const sym = row.symbol;
+      const asset = row.asset;
+      const price = row.price;
+      const ob = params.orderbookSnapshots(sym);
+      const candles = params.candlesProvider ? params.candlesProvider(sym) : [];
+      let verdict = "WAIT_NEUTRAL";
+      let verdictLabelRu = "\u26AA \u0412\u041D\u0415 \u0420\u042B\u041D\u041A\u0410 (WAIT / CASH)";
+      let direction = "NEUTRAL";
+      let conviction = Math.min(
+        98,
+        Math.max(35, Math.abs(row.masterScore) + 25)
+      );
+      if (row.masterScore >= 35) {
+        verdict = "STRONG_BUY";
+        verdictLabelRu = "\u{1F7E2} \u041F\u041E\u041A\u0423\u041F\u0410\u0422\u042C (STRONG BUY)";
+        direction = "LONG";
+      } else if (row.masterScore >= 18) {
+        verdict = "ACCUMULATE_DIP";
+        verdictLabelRu = "\u{1F7E2} \u0414\u041E\u0411\u041E\u0420 \u041D\u0410 \u041E\u0422\u041A\u0410\u0422\u0415 (BUY DIP)";
+        direction = "LONG";
+      } else if (row.masterScore <= -35) {
+        verdict = "STRONG_SELL";
+        verdictLabelRu = "\u{1F534} \u041F\u0420\u041E\u0414\u0410\u0412\u0410\u0422\u042C (STRONG SELL)";
+        direction = "SHORT";
+      } else if (row.masterScore <= -18) {
+        verdict = "DISTRIBUTE_RALLY";
+        verdictLabelRu = "\u{1F534} \u0420\u0410\u0417\u0413\u0420\u0423\u0417\u041A\u0410 \u041D\u0410 \u0420\u041E\u0421\u0422\u0415 (SELL RALLY)";
+        direction = "SHORT";
+      } else {
+        verdict = "WAIT_NEUTRAL";
+        verdictLabelRu = "\u26AA \u0412\u041D\u0415 \u0420\u042B\u041D\u041A\u0410 (WAIT / CASH)";
+        direction = "NEUTRAL";
+        conviction = Math.max(20, Math.min(50, 50 - Math.abs(row.masterScore)));
+      }
+      const setupDirection = direction === "SHORT" ? "SHORT" : "LONG";
+      const quantSetup = QuantExecutionCalculator.calculateTradeSetup({
+        symbol: sym,
+        direction: setupDirection,
+        accountBalanceUsd: balance,
+        riskPercent: riskPct,
+        currentPrice: price,
+        candles,
+        orderbook: ob,
+        whaleCampaigns: campaigns
+      });
+      const entryPrice = quantSetup.optimalEntryPrice || price;
+      const stopLossPrice = quantSetup.protectedStopLoss;
+      const stopDistancePercent = Number(
+        (Math.abs(entryPrice - stopLossPrice) / entryPrice * 100).toFixed(2)
+      );
+      const takeProfit1 = quantSetup.takeProfit1_15R;
+      const takeProfit1Percent = Number(
+        (Math.abs(takeProfit1 - entryPrice) / entryPrice * 100).toFixed(2)
+      );
+      const takeProfit2 = quantSetup.takeProfit2_25R;
+      const takeProfit2Percent = Number(
+        (Math.abs(takeProfit2 - entryPrice) / entryPrice * 100).toFixed(2)
+      );
+      const takeProfit3 = quantSetup.takeProfit3_Magnet;
+      const takeProfit3Percent = Number(
+        (Math.abs(takeProfit3 - entryPrice) / entryPrice * 100).toFixed(2)
+      );
+      const rewardToRisk = Number(quantSetup.rewardToRiskRatio.toFixed(2));
+      const sp = row.spotPerpMetrics;
+      let reason1 = "";
+      let cvdFlowStatusRu = "";
+      if (sp.regime === "BULLISH_SPOT_ABSORPTION") {
+        reason1 = `\u0421\u043F\u043E\u0442-\u043F\u043E\u0433\u043B\u043E\u0449\u0435\u043D\u0438\u0435: \u0447\u0438\u0441\u0442\u0430\u044F \u0441\u043A\u0443\u043F\u043A\u0430 \u0444\u0438\u0430\u0442\u043E\u043C \u043D\u0430 \u0441\u043F\u043E\u0442\u0435 ($+${Math.round(sp.spotCvd12hUsd / 1e6)}M), \u043F\u043E\u043A\u0430 \u043D\u0430 \u0444\u044C\u044E\u0447\u0435\u0440\u0441\u0430\u0445 \u0448\u043E\u0440\u0442\u044F\u0442.`;
+        cvdFlowStatusRu = `\u{1F40B} \u0421\u043F\u043E\u0442-\u043F\u043E\u0433\u043B\u043E\u0449\u0435\u043D\u0438\u0435: Spot CVD +$${(sp.spotCvd12hUsd / 1e6).toFixed(1)}M vs Perp -$${Math.abs(sp.perpCvd12hUsd / 1e6).toFixed(1)}M`;
+      } else if (sp.regime === "BEARISH_PERP_TRAP") {
+        reason1 = `\u041B\u043E\u0432\u0443\u0448\u043A\u0430 \u043F\u043E\u043A\u0443\u043F\u0430\u0442\u0435\u043B\u0435\u0439: \u0444\u044C\u044E\u0447\u0435\u0440\u0441\u044B \u0441 \u043F\u043B\u0435\u0447\u0430\u043C\u0438 \u043F\u043E\u043A\u0443\u043F\u0430\u044E\u0442, \u0430 \u0441\u043F\u043E\u0442 \u0441\u0431\u0440\u0430\u0441\u044B\u0432\u0430\u0435\u0442\u0441\u044F \u043A\u0438\u0442\u0430\u043C\u0438 ($${Math.round(sp.spotCvd12hUsd / 1e6)}M).`;
+        cvdFlowStatusRu = `\u26A0\uFE0F \u041B\u043E\u0432\u0443\u0448\u043A\u0430 \u043B\u043E\u043D\u0433\u043E\u0432: Perp CVD +$${(sp.perpCvd12hUsd / 1e6).toFixed(1)}M vs \u0441\u0431\u0440\u043E\u0441 \u0441\u043F\u043E\u0442\u0430 -$${Math.abs(sp.spotCvd12hUsd / 1e6).toFixed(1)}M`;
+      } else if (sp.regime === "SYNCHRONIZED_BULL_INFLOW") {
+        reason1 = `\u0421\u0438\u043D\u0445\u0440\u043E\u043D\u043D\u044B\u0439 \u0431\u044B\u0447\u0438\u0439 \u043F\u0440\u0438\u0442\u043E\u043A: \u0443\u0441\u0442\u043E\u0439\u0447\u0438\u0432\u044B\u0435 \u043F\u043E\u043A\u0443\u043F\u043A\u0438 \u043E\u0434\u043D\u043E\u0432\u0440\u0435\u043C\u0435\u043D\u043D\u043E \u043D\u0430 \u0441\u043F\u043E\u0442\u0435 \u0438 \u0444\u044C\u044E\u0447\u0435\u0440\u0441\u0430\u0445.`;
+        cvdFlowStatusRu = `\u{1F7E2} \u0421\u0438\u043D\u0445\u0440\u043E\u043D\u043D\u044B\u0439 \u0441\u043F\u0440\u043E\u0441: Spot CVD +$${(sp.spotCvd12hUsd / 1e6).toFixed(1)}M`;
+      } else {
+        reason1 = `\u0421\u0438\u043D\u0445\u0440\u043E\u043D\u043D\u044B\u0439 \u043C\u0435\u0434\u0432\u0435\u0436\u0438\u0439 \u043E\u0442\u0442\u043E\u043A: \u0447\u0438\u0441\u0442\u044B\u0435 \u043F\u0440\u043E\u0434\u0430\u0436\u0438 \u043D\u0430 \u0432\u0441\u0435\u0445 \u0434\u0435\u0440\u0438\u0432\u0430\u0442\u0438\u0432\u043D\u044B\u0445 \u043F\u043B\u043E\u0449\u0430\u0434\u043A\u0430\u0445.`;
+        cvdFlowStatusRu = `\u{1F534} \u0427\u0438\u0441\u0442\u044B\u0435 \u043F\u0440\u043E\u0434\u0430\u0436\u0438: Spot CVD -$${Math.abs(sp.spotCvd12hUsd / 1e6).toFixed(1)}M`;
+      }
+      let reason2 = "";
+      let macroCoinbaseStatusRu = "";
+      if (sp.coinbasePremiumBps >= 3.5) {
+        reason2 = `\u0418\u043D\u0441\u0442\u0438\u0442\u0443\u0446\u0438\u043E\u043D\u0430\u043B\u044B \u0421\u0428\u0410: \u043F\u0440\u0435\u043C\u0438\u044F Coinbase +${sp.coinbasePremiumBps.toFixed(1)} bps \u043F\u043E\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442 \u043F\u0440\u0438\u0442\u043E\u043A \u043A\u0430\u043F\u0438\u0442\u0430\u043B\u0430 \u0438\u0437 ETF.`;
+        macroCoinbaseStatusRu = `\u{1F1FA}\u{1F1F8} \u041F\u0440\u0435\u043C\u0438\u044F Coinbase: +${sp.coinbasePremiumBps.toFixed(1)} bps (\u041F\u043E\u043A\u0443\u043F\u043A\u0438 \u0444\u043E\u043D\u0434\u043E\u0432 \u0421\u0428\u0410)`;
+      } else if (sp.coinbasePremiumBps <= -3.5) {
+        reason2 = `\u0414\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u0432 \u0421\u0428\u0410: \u0434\u0438\u0441\u043A\u043E\u043D\u0442 Coinbase ${sp.coinbasePremiumBps.toFixed(1)} bps \u0443\u043A\u0430\u0437\u044B\u0432\u0430\u0435\u0442 \u043D\u0430 \u043F\u0440\u043E\u0434\u0430\u0436\u0438 \u0430\u043C\u0435\u0440\u0438\u043A\u0430\u043D\u0441\u043A\u0438\u0445 \u0444\u043E\u043D\u0434\u043E\u0432.`;
+        macroCoinbaseStatusRu = `\u{1F1FA}\u{1F1F8} \u0414\u0438\u0441\u043A\u043E\u043D\u0442 Coinbase: ${sp.coinbasePremiumBps.toFixed(1)} bps (\u041F\u0440\u043E\u0434\u0430\u0436\u0438 \u0444\u043E\u043D\u0434\u043E\u0432 \u0421\u0428\u0410)`;
+      } else {
+        reason2 = `\u0410\u043C\u0435\u0440\u0438\u043A\u0430\u043D\u0441\u043A\u0430\u044F \u0441\u0435\u0441\u0441\u0438\u044F \u043D\u0435\u0439\u0442\u0440\u0430\u043B\u044C\u043D\u0430: \u043F\u0440\u0435\u043C\u0438\u044F Coinbase \u043E\u043A\u043E\u043B\u043E \u043D\u0443\u043B\u044F (${sp.coinbasePremiumBps.toFixed(1)} bps).`;
+        macroCoinbaseStatusRu = `\u{1F1FA}\u{1F1F8} Coinbase \u043F\u0440\u0435\u043C\u0438\u044F: ${sp.coinbasePremiumBps.toFixed(1)} bps (\u041F\u0430\u0440\u0438\u0442\u0435\u0442)`;
+      }
+      let reason3 = "";
+      let l2WallStatusRu = "";
+      const isLong = direction === "LONG" || direction === "NEUTRAL";
+      if (ob && (isLong ? ob.biggestBidWall : ob.biggestAskWall)) {
+        const wall = isLong ? ob.biggestBidWall : ob.biggestAskWall;
+        const wallTypeRu = isLong ? "\u041F\u043B\u0438\u0442\u0430 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u043A\u0438" : "\u041F\u043B\u0438\u0442\u0430 \u0441\u043E\u043F\u0440\u043E\u0442\u0438\u0432\u043B\u0435\u043D\u0438\u044F";
+        const qtyStr = typeof wall.quantity === "number" ? wall.quantity.toFixed(1) : "0";
+        reason3 = `${wallTypeRu}: \u043F\u043E\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043D\u043D\u0430\u044F L2-\u0441\u0442\u0435\u043D\u0430 \u043D\u0430 $${_QuantActionRadarService.formatPrice(wall.price)} \u0437\u0430\u0449\u0438\u0449\u0430\u0435\u0442 \u0441\u0442\u043E\u043F-\u043B\u043E\u0441\u0441.`;
+        l2WallStatusRu = `\u{1F6E1}\uFE0F \u041F\u043B\u0438\u0442\u0430 L2: $${_QuantActionRadarService.formatPrice(wall.price)} (${qtyStr} ${asset})`;
+      } else {
+        reason3 = `\u0412\u043E\u043B\u0430\u0442\u0438\u043B\u044C\u043D\u043E\u0441\u0442\u044C \u043F\u043E ATR: \u0434\u0438\u043D\u0430\u043C\u0438\u0447\u0435\u0441\u043A\u0438\u0439 \u043A\u043E\u0440\u0438\u0434\u043E\u0440 \u0440\u0438\u0441\u043A\u0430 ${stopDistancePercent}% \u0441 \u0444\u0438\u043B\u044C\u0442\u0440\u043E\u043C \u0448\u0443\u043C\u0430.`;
+        l2WallStatusRu = `\u{1F4CA} \u0412\u043E\u043B\u0430\u0442\u0438\u043B\u044C\u043D\u043E\u0441\u0442\u044C: ATR 14 = ${stopDistancePercent}%`;
+      }
+      const primaryReasonsRu = [
+        reason1,
+        reason2,
+        reason3
+      ];
+      const ticket = _QuantActionRadarService.buildTelegramTicket({
+        asset,
+        symbol: sym,
+        verdictLabelRu,
+        conviction,
+        direction,
+        entryPrice,
+        stopLossPrice,
+        stopDistancePercent,
+        takeProfit1,
+        takeProfit1Percent,
+        takeProfit2,
+        takeProfit2Percent,
+        takeProfit3,
+        takeProfit3Percent,
+        rewardToRisk,
+        primaryReasonsRu,
+        l2WallStatusRu
+      });
+      signals.push({
+        symbol: sym,
+        asset,
+        price,
+        direction,
+        verdict,
+        verdictLabelRu,
+        convictionPercent: conviction,
+        masterScore: row.masterScore,
+        timeframe: "1H - 4H \u0421\u0412\u0418\u041D\u0413",
+        entryPrice,
+        stopLossPrice,
+        stopDistancePercent,
+        takeProfit1,
+        takeProfit1Percent,
+        takeProfit2,
+        takeProfit2Percent,
+        takeProfit3,
+        takeProfit3Percent,
+        rewardToRisk,
+        primaryReasonsRu,
+        l2WallStatusRu,
+        cvdFlowStatusRu,
+        macroCoinbaseStatusRu,
+        telegramTicketText: ticket,
+        quantSetup
+      });
+    }
+    signals.sort((a, b) => Math.abs(b.masterScore) - Math.abs(a.masterScore));
+    const buyCount = signals.filter(
+      (s) => s.verdict === "STRONG_BUY" || s.verdict === "ACCUMULATE_DIP"
+    ).length;
+    const sellCount = signals.filter(
+      (s) => s.verdict === "STRONG_SELL" || s.verdict === "DISTRIBUTE_RALLY"
+    ).length;
+    const waitCount = signals.filter(
+      (s) => s.verdict === "WAIT_NEUTRAL"
+    ).length;
+    const avgScore = signals.length > 0 ? Math.round(
+      signals.reduce((acc, s) => acc + s.masterScore, 0) / signals.length
+    ) : 0;
+    let overallMarketRegimeRu = "\u26AA \u041D\u0415\u0419\u0422\u0420\u0410\u041B\u042C\u041D\u042B\u0419 \u0411\u041E\u041A\u041E\u0412\u0418\u041A (CHOP / RISK-OFF)";
+    if (avgScore >= 25 && buyCount > sellCount) {
+      overallMarketRegimeRu = "\u{1F7E2} \u0411\u042B\u0427\u0418\u0419 \u041F\u0420\u0418\u0422\u041E\u041A \u041A\u0410\u041F\u0418\u0422\u0410\u041B\u0410 (BULLISH CONFLUENCE)";
+    } else if (avgScore <= -25 && sellCount > buyCount) {
+      overallMarketRegimeRu = "\u{1F534} \u041C\u0415\u0414\u0412\u0415\u0416\u0418\u0419 \u041E\u0422\u0422\u041E\u041A (BEARISH BIAS)";
+    } else if (buyCount > sellCount) {
+      overallMarketRegimeRu = "\u{1F7E2} \u0423\u041C\u0415\u0420\u0415\u041D\u041D\u041E-\u0411\u042B\u0427\u0418\u0419 \u0420\u0415\u0416\u0418\u041C (SELECTIVE ACCUMULATION)";
+    } else if (sellCount > buyCount) {
+      overallMarketRegimeRu = "\u{1F534} \u0423\u041C\u0415\u0420\u0415\u041D\u041D\u041E-\u041C\u0415\u0414\u0412\u0415\u0416\u0418\u0419 \u0420\u0415\u0416\u0418\u041C (DEFENSIVE ROTATION)";
+    }
+    const topLong = signals.find(
+      (s) => s.verdict === "STRONG_BUY" || s.verdict === "ACCUMULATE_DIP"
+    ) || null;
+    const topShort = signals.find(
+      (s) => s.verdict === "STRONG_SELL" || s.verdict === "DISTRIBUTE_RALLY"
+    ) || null;
+    const statArbNeutralPicks = (params.statArbRows || []).filter(
+      (s) => s.signal !== "EQUILIBRIUM"
+    );
+    return {
+      timestamp: Date.now(),
+      overallMarketRegimeRu,
+      marketBiasScore: avgScore,
+      totalTracked: signals.length,
+      buyCount,
+      sellCount,
+      waitCount,
+      topLongPick: topLong,
+      topShortPick: topShort,
+      signals,
+      statArbNeutralPicks
+    };
+  }
+  static formatPrice(p) {
+    if (p < 1e-3) return p.toFixed(6);
+    if (p < 1) return p.toFixed(4);
+    if (p < 10) return p.toFixed(3);
+    if (p < 100) return p.toFixed(2);
+    return p.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    });
+  }
+  static buildTelegramTicket(p) {
+    const isNeutral = p.direction === "NEUTRAL";
+    const headerEmoji = p.direction === "LONG" ? "\u{1F7E2}" : p.direction === "SHORT" ? "\u{1F534}" : "\u26AA";
+    const actionWord = p.direction === "LONG" ? "LONG / \u041F\u041E\u041A\u0423\u041F\u041A\u0410" : p.direction === "SHORT" ? "SHORT / \u041F\u0420\u041E\u0414\u0410\u0416\u0410" : "WAIT / \u0412\u041D\u0415 \u0420\u042B\u041D\u041A\u0410";
+    return [
+      `\u{1F3DB}\uFE0F APEX // QUANT ACTION SIGNAL ${headerEmoji}`,
+      `\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501`,
+      `\u{1F4CC} \u0410\u043A\u0442\u0438\u0432: #${p.asset} / USDT (${actionWord})`,
+      `\u{1F3AF} \u0421\u0438\u0433\u043D\u0430\u043B: ${p.verdictLabelRu}`,
+      `\u{1F4CA} \u0423\u0432\u0435\u0440\u0435\u043D\u043D\u043E\u0441\u0442\u044C: ${p.conviction}% (Confluence Matrix)`,
+      ``,
+      isNeutral ? `\u26A0\uFE0F \u0420\u0435\u043A\u043E\u043C\u0435\u043D\u0434\u0430\u0446\u0438\u044F: \u041E\u0441\u0442\u0430\u0432\u0430\u0442\u044C\u0441\u044F \u0432 \u0441\u0442\u0435\u0439\u0431\u043B\u043A\u043E\u0438\u043D\u0430\u0445. \u0421\u043C\u0435\u0448\u0430\u043D\u043D\u044B\u0435 \u0444\u0430\u043A\u0442\u043E\u0440\u044B.` : [
+        `\u{1F4B5} \u0412\u0445\u043E\u0434 (Optimal Entry): $${_QuantActionRadarService.formatPrice(p.entryPrice)}`,
+        `\u{1F6E1}\uFE0F \u0421\u0442\u043E\u043F-\u043B\u043E\u0441\u0441 (SL): $${_QuantActionRadarService.formatPrice(p.stopLossPrice)} (-${p.stopDistancePercent}%)`,
+        `\u{1F3AF} \u0422\u0435\u0439\u043A-\u043F\u0440\u043E\u0444\u0438\u0442 1: $${_QuantActionRadarService.formatPrice(p.takeProfit1)} (+${p.takeProfit1Percent}% \xB7 \u0410\u0432\u0442\u043E-\u0431\u0435\u0437\u0443\u0431\u044B\u0442\u043E\u043A)`,
+        `\u{1F3AF} \u0422\u0435\u0439\u043A-\u043F\u0440\u043E\u0444\u0438\u0442 2: $${_QuantActionRadarService.formatPrice(p.takeProfit2)} (+${p.takeProfit2Percent}% \xB7 \u0426\u0435\u043B\u044C \u0442\u0440\u0435\u043D\u0434\u0430)`,
+        `\u{1F3AF} \u0422\u0435\u0439\u043A-\u043F\u0440\u043E\u0444\u0438\u0442 3: $${_QuantActionRadarService.formatPrice(p.takeProfit3)} (+${p.takeProfit3Percent}% \xB7 \u041B\u0438\u043A\u0432\u0438\u0434\u0430\u0446\u0438\u0438)`,
+        `\u2696\uFE0F R:R (\u041F\u0440\u0438\u0431\u044B\u043B\u044C / \u0420\u0438\u0441\u043A): ${p.rewardToRisk} : 1`
+      ].join("\n"),
+      ``,
+      `\u{1F50D} \u041A\u043B\u044E\u0447\u0435\u0432\u044B\u0435 \u043F\u0440\u0438\u0447\u0438\u043D\u044B:`,
+      `1. ${p.primaryReasonsRu[0]}`,
+      `2. ${p.primaryReasonsRu[1]}`,
+      `3. ${p.primaryReasonsRu[2]}`,
+      ``,
+      `\u{1F512} ${p.l2WallStatusRu}`,
+      `\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501`,
+      `\u26A1 \u0421\u0433\u0435\u043D\u0435\u0440\u0438\u0440\u043E\u0432\u0430\u043D\u043E Apex Terminal Live Engine`
+    ].join("\n");
+  }
+};
+
 // src/web/app.ts
 var ApexWebTerminal = class {
   binanceWs;
@@ -8885,6 +9140,7 @@ var ApexWebTerminal = class {
   portfolio;
   isEditingCustomPortfolio = false;
   activeScreen = "MARKET";
+  radarFilter = "ALL";
   selectedStressId = "CRYPTO_CRASH_20";
   whaleFilter = "ALL";
   constructor() {
@@ -8983,6 +9239,7 @@ var ApexWebTerminal = class {
             <button id="btn-go" class="btn-go">&lt;GO&gt;</button>
           </div>
           <div class="quick-commands">
+            <button class="cmd-chip radar-chip" data-cmd="RADAR">\u{1F3AF} \u0421\u0418\u0413\u041D\u0410\u041B\u042B &lt;GO&gt;</button>
             <button class="cmd-chip active" data-cmd="MARKET">MARKET &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="CHART">\u{1F4C8} CHART &lt;GO&gt;</button>
             <button class="cmd-chip" data-cmd="BOOK">\u{1F9F1} BOOK &lt;GO&gt;</button>
@@ -9108,7 +9365,9 @@ var ApexWebTerminal = class {
     const cleaned = raw.toUpperCase().replace(/<GO>/g, "").trim();
     if (!cleaned) return;
     playCommandGo();
-    if (cleaned === "MARKET" || cleaned === "MKT") {
+    if (cleaned === "RADAR" || cleaned === "SIGNALS" || cleaned === "SIGNAL" || cleaned === "ACTION" || cleaned === "BUY" || cleaned === "SELL" || cleaned === "BRIEF" || cleaned === "CALLS" || cleaned === "\u0421\u0418\u0413\u041D\u0410\u041B\u042B" || cleaned === "\u0421\u0418\u0413\u041D\u0410\u041B") {
+      this.activeScreen = "RADAR";
+    } else if (cleaned === "MARKET" || cleaned === "MKT") {
       this.activeScreen = "MARKET";
     } else if (cleaned === "CHART" || cleaned === "CANDLE" || cleaned === "KLINES" || cleaned === "VWAP") {
       this.activeScreen = "CHART";
@@ -9350,7 +9609,9 @@ var ApexWebTerminal = class {
   render() {
     const body = document.getElementById("terminal-body");
     if (!body) return;
-    if (this.activeScreen === "MARKET") {
+    if (this.activeScreen === "RADAR") {
+      this.renderRadarScreen(body);
+    } else if (this.activeScreen === "MARKET") {
       this.renderMarketScreen(body);
     } else if (this.activeScreen === "CHART") {
       this.renderChartScreen(body);
@@ -9385,9 +9646,365 @@ var ApexWebTerminal = class {
     }
   }
   // ==========================================
+  // SCREEN: QUANT EXECUTIVE ACTION RADAR (RADAR <GO>)
+  // ==========================================
+  renderRadarScreen(container) {
+    const btcOpt = this.derivService.getOptionsSnapshot("BTC");
+    const ethOpt = this.derivService.getOptionsSnapshot("ETH");
+    const confluenceRows = this.quantEngine.computeMasterConfluenceMatrix({
+      tickers: this.tickers,
+      fundingRates: this.fundingRates,
+      whaleTrades: this.whaleStream.getWhaleTrades(),
+      orderbookSnapshots: (sym) => this.orderbookService.getSnapshotForSymbol(sym),
+      btcOptions: btcOpt,
+      ethOptions: ethOpt
+    });
+    const statArbRows = WorldClassQuantService.computeStatArbMatrix(
+      this.returnsService.getReturns(),
+      this.tickers
+    );
+    const chartData = this.chartService.buildChartData();
+    const radar = QuantActionRadarService.synthesizeRadar({
+      confluenceRows,
+      tickers: this.tickers,
+      fundingRates: this.fundingRates,
+      whaleTrades: this.whaleStream.getWhaleTrades(),
+      whaleCampaigns: this.whaleStream.getTrancheCampaigns(),
+      orderbookSnapshots: (sym) => this.orderbookService.getSnapshotForSymbol(sym),
+      statArbRows,
+      candlesProvider: (sym) => sym === chartData.symbol ? chartData.candles : [],
+      accountBalanceUsd: this.execBalanceUsd,
+      riskPercent: this.execRiskPercent
+    });
+    let filteredSignals = radar.signals;
+    if (this.radarFilter === "BUY") {
+      filteredSignals = radar.signals.filter(
+        (s) => s.verdict === "STRONG_BUY" || s.verdict === "ACCUMULATE_DIP"
+      );
+    } else if (this.radarFilter === "SELL") {
+      filteredSignals = radar.signals.filter(
+        (s) => s.verdict === "STRONG_SELL" || s.verdict === "DISTRIBUTE_RALLY"
+      );
+    } else if (this.radarFilter === "HIGH_CONVICTION") {
+      filteredSignals = radar.signals.filter((s) => s.convictionPercent >= 65);
+    }
+    const fmtPrice = (p) => QuantActionRadarService.formatPrice(p);
+    container.innerHTML = `
+      <div class="terminal-screen screen-radar">
+        <div class="radar-screen-header">
+          <div class="screen-title-group">
+            <h2 class="screen-title">\u{1F3AF} 0. QUANT EXECUTIVE ACTION RADAR (\u0421\u0412\u041E\u0414\u041A\u0410: \u0413\u0414\u0415 \u041F\u041E\u041A\u0423\u041F\u0410\u0422\u042C / \u041F\u0420\u041E\u0414\u0410\u0412\u0410\u0422\u042C)</h2>
+            <span class="screen-subtitle">\u0410\u0412\u0422\u041E\u041C\u0410\u0422\u0418\u0417\u0418\u0420\u041E\u0412\u0410\u041D\u041D\u042B\u0419 \u0421\u0418\u041D\u0422\u0415\u0417 6 \u041A\u0412\u0410\u041D\u0422-\u0424\u0410\u041A\u0422\u041E\u0420\u041E\u0412 \xB7 \u0412\u0425\u041E\u0414, \u0421\u0422\u041E\u041F \u0417\u0410 \u041F\u041B\u0418\u0422\u041E\u0419, \u0422\u0415\u0419\u041A-\u041F\u0420\u041E\u0424\u0418\u0422\u042B \u0418 R:R</span>
+          </div>
+          <div class="radar-pills-wrap">
+            <div class="stat-pill">
+              <span class="pill-label">\u0420\u0415\u0416\u0418\u041C \u0420\u042B\u041D\u041A\u0410</span>
+              <span class="pill-val ${radar.marketBiasScore >= 20 ? "text-green" : radar.marketBiasScore <= -20 ? "text-red" : "text-amber"}">
+                ${radar.overallMarketRegimeRu}
+              </span>
+            </div>
+            <div class="stat-pill">
+              <span class="pill-label">\u0421\u0412\u041E\u0414\u041A\u0410 \u0421\u0418\u0413\u041D\u0410\u041B\u041E\u0412</span>
+              <span class="pill-val">
+                <span class="text-green">\u{1F7E2} ${radar.buyCount} BUY</span> \xB7 
+                <span class="text-red">\u{1F534} ${radar.sellCount} SELL</span> \xB7 
+                <span class="text-muted">\u26AA ${radar.waitCount} WAIT</span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Top Pick Hero Cards -->
+        ${radar.topLongPick || radar.topShortPick ? `
+          <div class="radar-hero-grid">
+            ${radar.topLongPick ? `
+              <div class="hero-pick-card long-hero">
+                <div class="card-top-row">
+                  <div>
+                    <span class="hero-tag text-green">\u2B50 \u041B\u0423\u0427\u0428\u0418\u0419 \u0421\u0415\u0422\u0410\u041F \u041D\u0410 \u041F\u041E\u041A\u0423\u041F\u041A\u0423 (TOP LONG PICK)</span>
+                    <div class="card-symbol">${radar.topLongPick.asset}/USDT</div>
+                    <div class="card-price">$${fmtPrice(radar.topLongPick.price)}</div>
+                  </div>
+                  <div class="verdict-badge verdict-buy">${radar.topLongPick.verdictLabelRu}</div>
+                </div>
+                <div class="card-levels-grid">
+                  <div class="level-cell">
+                    <span class="level-lbl">\u0412\u0445\u043E\u0434 (Entry)</span>
+                    <span class="level-val">$${fmtPrice(radar.topLongPick.entryPrice)}</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">\u0421\u0442\u043E\u043F (SL \u0437\u0430 \u043F\u043B\u0438\u0442\u043E\u0439)</span>
+                    <span class="level-val text-red">$${fmtPrice(radar.topLongPick.stopLossPrice)} (-${radar.topLongPick.stopDistancePercent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">TP1 (\u0410\u0432\u0442\u043E-\u0411\u0423)</span>
+                    <span class="level-val text-green">$${fmtPrice(radar.topLongPick.takeProfit1)} (+${radar.topLongPick.takeProfit1Percent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">R:R \u0421\u043E\u043E\u0442\u043D\u043E\u0448\u0435\u043D\u0438\u0435</span>
+                    <span class="level-val text-green">${radar.topLongPick.rewardToRisk} : 1</span>
+                  </div>
+                </div>
+                <div class="card-actions-row">
+                  <button class="btn-card-action btn-card-exec btn-radar-exec" data-sym="${radar.topLongPick.symbol}" data-dir="LONG">\u26A1 \u0412 \u041A\u0410\u041B\u042C\u041A\u0423\u041B\u042F\u0422\u041E\u0420 (EXEC)</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-copy" data-sym="${radar.topLongPick.symbol}">\u{1F4CB} \u0421\u041A\u041E\u041F\u0418\u0420\u041E\u0412\u0410\u0422\u042C \u0422\u0418\u041A\u0415\u0422</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${radar.topLongPick.symbol}">\u{1F4C8} \u0413\u0420\u0410\u0424\u0418\u041A</button>
+                </div>
+              </div>
+            ` : ""}
+            ${radar.topShortPick ? `
+              <div class="hero-pick-card short-hero">
+                <div class="card-top-row">
+                  <div>
+                    <span class="hero-tag text-red">\u2B50 \u041B\u0423\u0427\u0428\u0418\u0419 \u0421\u0415\u0422\u0410\u041F \u041D\u0410 \u041F\u0420\u041E\u0414\u0410\u0416\u0423 / \u0425\u0415\u0414\u0416 (TOP SHORT)</span>
+                    <div class="card-symbol">${radar.topShortPick.asset}/USDT</div>
+                    <div class="card-price">$${fmtPrice(radar.topShortPick.price)}</div>
+                  </div>
+                  <div class="verdict-badge verdict-sell">${radar.topShortPick.verdictLabelRu}</div>
+                </div>
+                <div class="card-levels-grid">
+                  <div class="level-cell">
+                    <span class="level-lbl">\u0412\u0445\u043E\u0434 (Entry)</span>
+                    <span class="level-val">$${fmtPrice(radar.topShortPick.entryPrice)}</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">\u0421\u0442\u043E\u043F (SL \u043D\u0430\u0434 \u0441\u0442\u0435\u043D\u043E\u0439)</span>
+                    <span class="level-val text-red">$${fmtPrice(radar.topShortPick.stopLossPrice)} (+${radar.topShortPick.stopDistancePercent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">TP1 (\u0410\u0432\u0442\u043E-\u0411\u0423)</span>
+                    <span class="level-val text-green">$${fmtPrice(radar.topShortPick.takeProfit1)} (-${radar.topShortPick.takeProfit1Percent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">R:R \u0421\u043E\u043E\u0442\u043D\u043E\u0448\u0435\u043D\u0438\u0435</span>
+                    <span class="level-val text-green">${radar.topShortPick.rewardToRisk} : 1</span>
+                  </div>
+                </div>
+                <div class="card-actions-row">
+                  <button class="btn-card-action btn-card-exec btn-radar-exec" data-sym="${radar.topShortPick.symbol}" data-dir="SHORT">\u26A1 \u0412 \u041A\u0410\u041B\u042C\u041A\u0423\u041B\u042F\u0422\u041E\u0420 (EXEC)</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-copy" data-sym="${radar.topShortPick.symbol}">\u{1F4CB} \u0421\u041A\u041E\u041F\u0418\u0420\u041E\u0412\u0410\u0422\u042C \u0422\u0418\u041A\u0415\u0422</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${radar.topShortPick.symbol}">\u{1F4C8} \u0413\u0420\u0410\u0424\u0418\u041A</button>
+                </div>
+              </div>
+            ` : ""}
+          </div>
+        ` : ""}
+
+        <!-- Filter Bar -->
+        <div class="radar-filter-bar">
+          <button class="radar-filter-btn ${this.radarFilter === "ALL" ? "active" : ""}" data-filter="ALL">\u0412\u0421\u0415 \u0421\u0418\u0413\u041D\u0410\u041B\u042B (${radar.totalTracked})</button>
+          <button class="radar-filter-btn ${this.radarFilter === "BUY" ? "active" : ""}" data-filter="BUY">\u{1F7E2} \u0422\u041E\u041B\u042C\u041A\u041E \u041F\u041E\u041A\u0423\u041F\u0410\u0422\u042C (${radar.buyCount})</button>
+          <button class="radar-filter-btn ${this.radarFilter === "SELL" ? "active" : ""}" data-filter="SELL">\u{1F534} \u0422\u041E\u041B\u042C\u041A\u041E \u041F\u0420\u041E\u0414\u0410\u0412\u0410\u0422\u042C (${radar.sellCount})</button>
+          <button class="radar-filter-btn ${this.radarFilter === "HIGH_CONVICTION" ? "active" : ""}" data-filter="HIGH_CONVICTION">\u2B50 \u0412\u042B\u0421\u041E\u041A\u0410\u042F \u0423\u0412\u0415\u0420\u0415\u041D\u041D\u041E\u0421\u0422\u042C (\u226565%)</button>
+        </div>
+
+        <!-- Signals Cards Grid -->
+        <div class="radar-cards-grid">
+          ${filteredSignals.map((sig) => {
+      const cardClass = sig.direction === "LONG" ? "card-buy" : sig.direction === "SHORT" ? "card-sell" : "card-wait";
+      const verdictClass = sig.direction === "LONG" ? "verdict-buy" : sig.direction === "SHORT" ? "verdict-sell" : "verdict-wait";
+      const fillClass = sig.direction === "LONG" ? "fill-green" : sig.direction === "SHORT" ? "fill-red" : "fill-neutral";
+      return `
+              <div class="signal-card ${cardClass}" id="sig-card-${sig.symbol}">
+                <div class="card-top-row">
+                  <div class="card-sym-group">
+                    <span class="card-symbol">${sig.asset}/USDT</span>
+                    <span class="card-price">$${fmtPrice(sig.price)}</span>
+                  </div>
+                  <div class="verdict-badge ${verdictClass}">${sig.verdictLabelRu}</div>
+                </div>
+
+                <div class="conviction-box">
+                  <div class="conviction-header">
+                    <span>\u0423\u0412\u0415\u0420\u0415\u041D\u041D\u041E\u0421\u0422\u042C (CONFLUENCE)</span>
+                    <strong>${sig.convictionPercent}% (\u0421\u041A\u041E\u0420: ${sig.masterScore >= 0 ? "+" : ""}${sig.masterScore})</strong>
+                  </div>
+                  <div class="conviction-track">
+                    <div class="conviction-fill ${fillClass}" style="width: ${sig.convictionPercent}%"></div>
+                  </div>
+                </div>
+
+                <div class="card-levels-grid">
+                  <div class="level-cell">
+                    <span class="level-lbl">\u0412\u0445\u043E\u0434 (Entry)</span>
+                    <span class="level-val">$${fmtPrice(sig.entryPrice)}</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">\u0421\u0442\u043E\u043F (SL)</span>
+                    <span class="level-val text-red">$${fmtPrice(sig.stopLossPrice)} (-${sig.stopDistancePercent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">\u0426\u0435\u043B\u044C 1 (TP1 \u0410\u0432\u0442\u043E-\u0411\u0423)</span>
+                    <span class="level-val text-green">$${fmtPrice(sig.takeProfit1)} (+${sig.takeProfit1Percent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">\u0426\u0435\u043B\u044C 2 (TP2 \u0422\u0440\u0435\u043D\u0434)</span>
+                    <span class="level-val text-green">$${fmtPrice(sig.takeProfit2)} (+${sig.takeProfit2Percent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">\u0426\u0435\u043B\u044C 3 (\u041B\u0438\u043A\u0432\u0438\u0434\u0430\u0446\u0438\u0438)</span>
+                    <span class="level-val text-amber">$${fmtPrice(sig.takeProfit3)} (+${sig.takeProfit3Percent}%)</span>
+                  </div>
+                  <div class="level-cell">
+                    <span class="level-lbl">R:R \u0420\u0438\u0441\u043A/\u041F\u0440\u0438\u0431\u044B\u043B\u044C</span>
+                    <span class="level-val text-green">${sig.rewardToRisk} : 1</span>
+                  </div>
+                </div>
+
+                <div class="card-reasons-box">
+                  <span class="reasons-title">\u{1F50D} 3 \u041A\u041B\u042E\u0427\u0415\u0412\u042B\u0425 \u0424\u0410\u041A\u0422\u041E\u0420\u0410:</span>
+                  <ul class="reasons-list">
+                    <li>${sig.primaryReasonsRu[0]}</li>
+                    <li>${sig.primaryReasonsRu[1]}</li>
+                    <li>${sig.primaryReasonsRu[2]}</li>
+                  </ul>
+                </div>
+
+                <div class="card-actions-row">
+                  <button class="btn-card-action btn-card-exec btn-radar-exec" data-sym="${sig.symbol}" data-dir="${sig.direction === "SHORT" ? "SHORT" : "LONG"}">\u26A1 \u0412 \u041A\u0410\u041B\u042C\u041A\u0423\u041B\u042F\u0422\u041E\u0420</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-copy" data-sym="${sig.symbol}">\u{1F4CB} \u0421\u041A\u041E\u041F\u0418\u0420\u041E\u0412\u0410\u0422\u042C</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-tg" data-sym="${sig.symbol}">\u{1F4E4} \u0412 TELEGRAM</button>
+                  <button class="btn-card-action btn-card-primary btn-radar-chart" data-sym="${sig.symbol}">\u{1F4C8} \u0413\u0420\u0410\u0424\u0418\u041A</button>
+                </div>
+              </div>
+            `;
+    }).join("")}
+        </div>
+
+        <!-- Delta-Neutral StatArb Pairs -->
+        ${radar.statArbNeutralPicks.length > 0 ? `
+          <div class="terminal-card mt-4">
+            <div class="card-header">
+              <span class="card-title">\u{1F4D0} \u0420\u042B\u041D\u041E\u0427\u041D\u041E-\u041D\u0415\u0419\u0422\u0420\u0410\u041B\u042C\u041D\u042B\u0419 \u0410\u0420\u0411\u0418\u0422\u0420\u0410\u0416 (STATARB \u041F\u0410\u0420\u042B \u0411\u0415\u0417 \u0420\u0418\u0421\u041A\u0410 \u0420\u042B\u041D\u041A\u0410)</span>
+              <span class="badge badge-calibrated">\u041E\u0420\u041D\u0428\u0422\u0415\u0419\u041D-\u0423\u041B\u0415\u041D\u0411\u0415\u041A Z-SCORE</span>
+            </div>
+            <div class="market-matrix-table-wrap">
+              <table class="terminal-table">
+                <thead>
+                  <tr>
+                    <th>\u041F\u0410\u0420\u0410</th>
+                    <th>\u0421\u0418\u0413\u041D\u0410\u041B</th>
+                    <th>\u0421\u041F\u0420\u0415\u0414 Z-SCORE</th>
+                    <th>\u041F\u0415\u0420\u0418\u041E\u0414 \u041F\u041E\u041B\u0423\u0420\u0410\u0421\u041F\u0410\u0414\u0410</th>
+                    <th>\u041A\u041E\u0420\u0420\u0415\u041B\u042F\u0426\u0418\u042F 60D</th>
+                    <th>\u0420\u0415\u041A\u041E\u041C\u0415\u041D\u0414\u0410\u0426\u0418\u042F \u041A \u0414\u0415\u0419\u0421\u0422\u0412\u0418\u042E</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${radar.statArbNeutralPicks.map(
+      (p) => `
+                    <tr>
+                      <td class="td-symbol"><strong>${p.pairLabel}</strong></td>
+                      <td><span class="badge ${p.signal.includes("LONG_A") ? "badge-green" : "badge-red"}">${p.signal}</span></td>
+                      <td class="${p.spreadZScore <= -1.6 ? "text-green" : "text-red"}"><strong>${p.spreadZScore >= 0 ? "+" : ""}${p.spreadZScore}\u03C3</strong></td>
+                      <td>${p.halfLifeDays} \u0434\u043D.</td>
+                      <td>${p.correlation60d}</td>
+                      <td><strong>${p.actionableCall}</strong></td>
+                    </tr>
+                  `
+    ).join("")}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ` : ""}
+      </div>
+    `;
+    container.querySelectorAll(".radar-filter-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        playCommandGo();
+        const f = e.currentTarget.getAttribute(
+          "data-filter"
+        );
+        if (f) {
+          this.radarFilter = f;
+          this.renderRadarScreen(container);
+        }
+      });
+    });
+    container.querySelectorAll(".btn-radar-exec").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        playCommandGo();
+        const sym = e.currentTarget.getAttribute("data-sym");
+        const dir = e.currentTarget.getAttribute(
+          "data-dir"
+        );
+        if (sym) {
+          this.execSymbol = sym;
+          if (dir) this.execDirection = dir;
+          this.executeCommand("EXEC <GO>");
+        }
+      });
+    });
+    container.querySelectorAll(".btn-radar-chart").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        playCommandGo();
+        const sym = e.currentTarget.getAttribute("data-sym");
+        if (sym) {
+          this.chartService.loadCandles(sym);
+          this.executeCommand("CHART <GO>");
+        }
+      });
+    });
+    container.querySelectorAll(".btn-radar-copy").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        playCommandGo();
+        const sym = e.currentTarget.getAttribute("data-sym");
+        const sig = radar.signals.find((s) => s.symbol === sym);
+        if (sig) {
+          if (typeof navigator !== "undefined" && navigator.clipboard) {
+            navigator.clipboard.writeText(sig.telegramTicketText).catch(() => {
+            });
+          }
+          const target = e.currentTarget;
+          const orig = target.textContent;
+          target.textContent = "\u2705 \u0421\u041A\u041E\u041F\u0418\u0420\u041E\u0412\u0410\u041D\u041E!";
+          setTimeout(() => {
+            target.textContent = orig;
+          }, 2400);
+        }
+      });
+    });
+    container.querySelectorAll(".btn-radar-tg").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        playCommandGo();
+        const sym = e.currentTarget.getAttribute("data-sym");
+        const sig = radar.signals.find((s) => s.symbol === sym);
+        if (sig && sig.quantSetup) {
+          const target = e.currentTarget;
+          this.alertManager.dispatchTradeSetupTicket(sig.quantSetup).then((res) => {
+            target.textContent = res.telegramSent ? "\u2705 \u041E\u0422\u041F\u0420\u0410\u0412\u041B\u0415\u041D\u041E \u0412 TG!" : "\u2705 \u0421\u041A\u041E\u041F\u0418\u0420\u041E\u0412\u0410\u041D\u041E!";
+            setTimeout(() => {
+              target.textContent = "\u{1F4E4} \u0412 TELEGRAM";
+            }, 2500);
+          });
+        }
+      });
+    });
+  }
+  // ==========================================
   // SCREEN: MARKET MATRIX
   // ==========================================
   renderMarketScreen(container) {
+    const btcOpt = this.derivService.getOptionsSnapshot("BTC");
+    const ethOpt = this.derivService.getOptionsSnapshot("ETH");
+    const confluenceRows = this.quantEngine.computeMasterConfluenceMatrix({
+      tickers: this.tickers,
+      fundingRates: this.fundingRates,
+      whaleTrades: this.whaleStream.getWhaleTrades(),
+      orderbookSnapshots: (sym) => this.orderbookService.getSnapshotForSymbol(sym),
+      btcOptions: btcOpt,
+      ethOptions: ethOpt
+    });
+    const quickRadar = QuantActionRadarService.synthesizeRadar({
+      confluenceRows,
+      tickers: this.tickers,
+      fundingRates: this.fundingRates,
+      whaleTrades: this.whaleStream.getWhaleTrades(),
+      orderbookSnapshots: (sym) => this.orderbookService.getSnapshotForSymbol(sym),
+      accountBalanceUsd: this.execBalanceUsd,
+      riskPercent: this.execRiskPercent
+    });
     container.innerHTML = `
       <div class="terminal-screen screen-market">
         <div class="screen-header">
@@ -9405,6 +10022,24 @@ var ApexWebTerminal = class {
               </div>
             ` : ""}
           </div>
+        </div>
+
+        <!-- Executive Action Radar Hero Banner -->
+        <div class="market-radar-banner" id="market-radar-banner">
+          <div class="mrb-left">
+            <span class="mrb-badge">\u26A1 \u041A\u0420\u0410\u0422\u041A\u0410\u042F \u0421\u0412\u041E\u0414\u041A\u0410 \u0421\u0418\u0413\u041D\u0410\u041B\u041E\u0412 (RADAR &lt;GO&gt;)</span>
+            <span class="mrb-regime">${quickRadar.overallMarketRegimeRu}</span>
+          </div>
+          <div class="mrb-calls">
+            ${quickRadar.signals.slice(0, 5).map(
+      (s) => `
+              <span class="mrb-call-chip ${s.direction === "LONG" ? "chip-long" : s.direction === "SHORT" ? "chip-short" : "chip-wait"}" data-sym="${s.symbol}">
+                <strong>${s.asset}</strong>: ${s.direction === "LONG" ? "\u{1F7E2} LONG" : s.direction === "SHORT" ? "\u{1F534} SHORT" : "\u26AA WAIT"} (${s.convictionPercent}%)
+              </span>
+            `
+    ).join("")}
+          </div>
+          <button class="btn-open-radar" id="btn-open-radar">\u041E\u0422\u041A\u0420\u042B\u0422\u042C \u0412\u0421\u0415 \u0421\u0418\u0413\u041D\u0410\u041B\u042B (RADAR &lt;GO&gt;) \u2794</button>
         </div>
 
         <div class="market-matrix-table-wrap">
@@ -9427,6 +10062,18 @@ var ApexWebTerminal = class {
         </div>
       </div>
     `;
+    document.getElementById("btn-open-radar")?.addEventListener("click", () => {
+      this.executeCommand("RADAR <GO>");
+    });
+    container.querySelectorAll(".mrb-call-chip").forEach((chip) => {
+      chip.addEventListener("click", (e) => {
+        const sym = e.currentTarget.getAttribute("data-sym");
+        if (sym) {
+          this.chartService.loadCandles(sym);
+          this.executeCommand("RADAR <GO>");
+        }
+      });
+    });
   }
   renderTableRow(sym) {
     const t = this.tickers.get(sym);
@@ -12414,6 +13061,11 @@ var ApexWebTerminal = class {
         </div>
 
         <div class="help-grid">
+          <div class="help-card" style="border-color: var(--amber);">
+            <span class="help-cmd" style="color: var(--amber);">\u{1F3AF} RADAR &lt;GO&gt; / SIGNALS &lt;GO&gt;</span>
+            <p><strong>Executive Action Radar</strong>: \u041A\u0440\u0430\u0442\u043A\u0430\u044F \u0430\u0432\u0442\u043E\u043C\u0430\u0442\u0438\u0447\u0435\u0441\u043A\u0430\u044F \u0441\u0432\u043E\u0434\u043A\u0430 \u0433\u0434\u0435 \u041F\u041E\u041A\u0423\u041F\u0410\u0422\u042C \u0438\u043B\u0438 \u041F\u0420\u041E\u0414\u0410\u0412\u0410\u0422\u042C. \u0421\u0438\u043D\u0442\u0435\u0437 6 \u043A\u0432\u0430\u043D\u0442-\u0444\u0430\u043A\u0442\u043E\u0440\u043E\u0432, \u0442\u043E\u0447\u043D\u044B\u0439 \u0432\u0445\u043E\u0434, \u0441\u0442\u043E\u043F \u0437\u0430 L2-\u043F\u043B\u0438\u0442\u043E\u0439, TP1-TP3 \u0438 R:R.</p>
+          </div>
+
           <div class="help-card">
             <span class="help-cmd">MARKET &lt;GO&gt; [F2]</span>
             <p>Live streaming multi-asset pricing matrix, orderflow depth imbalance, and Fear &amp; Greed gauge (100% Real Live Binance).</p>

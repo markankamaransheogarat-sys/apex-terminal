@@ -1424,6 +1424,392 @@
         }
       }
 
+      /* ===================================================
+         EXECUTIVE ACTION RADAR & SIGNAL STYLES (RADAR <GO>)
+         =================================================== */
+      .radar-chip {
+        border-color: var(--amber) !important;
+        color: var(--amber) !important;
+        font-weight: 700 !important;
+        background: var(--amber-bg) !important;
+      }
+      .radar-chip.active {
+        background: var(--amber) !important;
+        color: #121413 !important;
+      }
+
+      /* Market Hero Banner */
+      .market-radar-banner {
+        background: linear-gradient(
+          135deg,
+          var(--crt-surface) 0%,
+          var(--crt-card) 100%
+        );
+        border: 1px solid var(--amber);
+        border-radius: 10px;
+        padding: 12px 16px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+        box-shadow: 0 4px 18px var(--amber-glow);
+        margin-bottom: 14px;
+      }
+      .mrb-left {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .mrb-badge {
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        color: var(--amber);
+      }
+      .mrb-regime {
+        font-size: 0.92rem;
+        font-weight: 700;
+        color: var(--text-heading);
+      }
+      .mrb-calls {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .mrb-call-chip {
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        font-weight: 600;
+        padding: 4px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition:
+          transform 0.15s ease,
+          opacity 0.15s ease;
+      }
+      .mrb-call-chip:hover {
+        transform: translateY(-1px);
+        opacity: 0.9;
+      }
+      .chip-long {
+        background: var(--sig-long-bg);
+        color: var(--sig-long-text);
+        border: 1px solid var(--green);
+      }
+      .chip-short {
+        background: var(--sig-short-bg);
+        color: var(--sig-short-text);
+        border: 1px solid var(--red);
+      }
+      .chip-wait {
+        background: var(--crt-elevated);
+        color: var(--text-muted);
+        border: 1px solid var(--crt-border);
+      }
+      .btn-open-radar {
+        background: var(--amber);
+        color: #121413;
+        border: none;
+        padding: 7px 14px;
+        border-radius: 6px;
+        font-family: var(--font-sans);
+        font-size: 0.76rem;
+        font-weight: 700;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: opacity 0.15s ease;
+      }
+      .btn-open-radar:hover {
+        opacity: 0.92;
+      }
+
+      /* Radar Screen Layout */
+      .radar-screen-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        border-bottom: 1px solid var(--crt-border);
+        padding-bottom: 14px;
+        margin-bottom: 14px;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+      .radar-pills-wrap {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .radar-filter-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 16px;
+        flex-wrap: wrap;
+      }
+      .radar-filter-btn {
+        background: var(--crt-card);
+        border: 1px solid var(--crt-border);
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        font-size: 0.74rem;
+        font-weight: 600;
+        padding: 5px 12px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .radar-filter-btn:hover {
+        background: var(--crt-elevated);
+        color: var(--text-main);
+      }
+      .radar-filter-btn.active {
+        background: var(--text-main);
+        color: var(--crt-bg);
+        border-color: var(--text-main);
+      }
+
+      /* Top Pick Hero Cards */
+      .radar-hero-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        gap: 14px;
+        margin-bottom: 18px;
+      }
+      .hero-pick-card {
+        background: var(--crt-surface);
+        border-radius: 10px;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        position: relative;
+        overflow: hidden;
+      }
+      .hero-pick-card.long-hero {
+        border: 1px solid var(--green);
+        box-shadow: 0 4px 20px var(--green-glow);
+      }
+      .hero-pick-card.short-hero {
+        border: 1px solid var(--red);
+        box-shadow: 0 4px 20px var(--red-glow);
+      }
+      .hero-tag {
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      /* Radar Cards Grid */
+      .radar-cards-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+        gap: 16px;
+      }
+      .signal-card {
+        background: var(--crt-card);
+        border-radius: 10px;
+        border: 1px solid var(--crt-border);
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        transition:
+          border-color 0.15s ease,
+          transform 0.15s ease;
+      }
+      .signal-card:hover {
+        border-color: var(--crt-border-bright);
+        transform: translateY(-2px);
+      }
+      .signal-card.card-buy {
+        border-left: 4px solid var(--green);
+      }
+      .signal-card.card-sell {
+        border-left: 4px solid var(--red);
+      }
+      .signal-card.card-wait {
+        border-left: 4px solid var(--text-dim);
+        opacity: 0.88;
+      }
+
+      .card-top-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+      }
+      .card-sym-group {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .card-symbol {
+        font-family: var(--font-serif);
+        font-size: 1.15rem;
+        font-weight: 600;
+        color: var(--text-heading);
+      }
+      .card-price {
+        font-family: var(--font-mono);
+        font-size: 0.88rem;
+        color: var(--text-muted);
+      }
+      .verdict-badge {
+        font-family: var(--font-mono);
+        font-size: 0.74rem;
+        font-weight: 700;
+        padding: 4px 9px;
+        border-radius: 6px;
+        white-space: nowrap;
+        text-align: right;
+      }
+      .verdict-buy {
+        background: var(--sig-long-bg);
+        color: var(--sig-long-text);
+        border: 1px solid var(--green);
+      }
+      .verdict-sell {
+        background: var(--sig-short-bg);
+        color: var(--sig-short-text);
+        border: 1px solid var(--red);
+      }
+      .verdict-wait {
+        background: var(--crt-elevated);
+        color: var(--text-muted);
+        border: 1px solid var(--crt-border);
+      }
+
+      /* Conviction Meter */
+      .conviction-box {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .conviction-header {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.7rem;
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+      }
+      .conviction-track {
+        height: 6px;
+        background: var(--crt-surface);
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .conviction-fill {
+        height: 100%;
+        border-radius: 3px;
+        transition: width 0.3s ease;
+      }
+      .fill-green {
+        background: var(--green);
+      }
+      .fill-red {
+        background: var(--red);
+      }
+      .fill-neutral {
+        background: var(--text-dim);
+      }
+
+      /* Levels Grid */
+      .card-levels-grid {
+        background: var(--crt-surface);
+        border: 1px solid var(--crt-border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+      }
+      .level-cell {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .level-lbl {
+        font-family: var(--font-mono);
+        font-size: 0.65rem;
+        color: var(--text-dim);
+        text-transform: uppercase;
+      }
+      .level-val {
+        font-family: var(--font-mono);
+        font-size: 0.84rem;
+        font-weight: 700;
+        color: var(--text-main);
+      }
+
+      /* Reasons List */
+      .card-reasons-box {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .reasons-title {
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+        font-weight: 700;
+        color: var(--amber);
+        text-transform: uppercase;
+      }
+      .reasons-list {
+        margin: 0;
+        padding-left: 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 0.76rem;
+        color: var(--text-muted);
+        line-height: 1.35;
+      }
+      .reasons-list li {
+        margin: 0;
+      }
+
+      /* Card Action Buttons */
+      .card-actions-row {
+        display: flex;
+        gap: 8px;
+        margin-top: 4px;
+        flex-wrap: wrap;
+      }
+      .btn-card-action {
+        flex: 1;
+        min-width: 90px;
+        padding: 7px 10px;
+        border-radius: 6px;
+        font-family: var(--font-sans);
+        font-size: 0.74rem;
+        font-weight: 600;
+        cursor: pointer;
+        text-align: center;
+        transition: all 0.15s ease;
+      }
+      .btn-card-primary {
+        background: var(--crt-elevated);
+        border: 1px solid var(--crt-border-bright);
+        color: var(--text-heading);
+      }
+      .btn-card-primary:hover {
+        background: var(--text-main);
+        color: var(--crt-bg);
+      }
+      .btn-card-exec {
+        background: var(--amber-bg);
+        border: 1px solid var(--amber);
+        color: var(--amber);
+      }
+      .btn-card-exec:hover {
+        background: var(--amber);
+        color: #121413;
+      }
+
       @media (max-width: 400px) {
         .aladdin-kpi-grid,
         .whale-kpi-grid {
